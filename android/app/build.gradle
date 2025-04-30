@@ -121,5 +121,13 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+     implementation project(':react-native-vector-icons')
+}
+
+apply from: "../../node_modules/react-native-vector-icons/fonts.gradle"
+
+// ✅ React Native plugin configs
+react {
+    autolinkLibrariesWithApp()
 }
 apply plugin: 'com.google.gms.google-services'

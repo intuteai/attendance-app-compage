@@ -63,7 +63,7 @@ const OTPVerificationScreen = ({ navigation, route }: any) => {
       }
 
       // Optionally update additional user data in Firestore or elsewhere
-      navigation.navigate('HomeScreen', { userId, email, phoneNumber, fullName });
+      navigation.navigate('Home', { userId, email, phoneNumber, fullName });
     } catch (error: any) {
       console.error('OTP Verification Error:', error);
       Alert.alert('Verification Failed', error.message || 'Invalid OTP. Please try again.');
