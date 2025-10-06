@@ -1,120 +1,239 @@
-import React, { useState, useRef } from 'react';
-import { View, Text, FlatList, TouchableOpacity, ActivityIndicator, Dimensions } from 'react-native';
+import React, { useMemo } from 'react';
+import { View, Text, FlatList, TouchableOpacity, ScrollView } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import Video, { VideoRef } from 'react-native-video'; // Import VideoRef type
-import { Icon } from 'react-native-elements';
+import { Icon, Avatar } from 'react-native-elements';
 import { styles } from './dashboard.styles';
 
-// Define the type for the navigation stack
 type RootStackParamList = {
   Signup: undefined;
   OTP: undefined;
   Home: undefined;
   Login: undefined;
-  Dashboard: { videoPaths?: string[] };
+  Dashboard: undefined;
 };
 
-// Use NativeStackScreenProps to get both navigation and route props
 type Props = NativeStackScreenProps<RootStackParamList, 'Dashboard'>;
 
-const { width, height } = Dimensions.get('window');
+// --- Helpers ---
+const startOfToday = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+const getMonthBounds = (ref: Date) => {
+  const start = new Date(ref.getFullYear(), ref.getMonth(), 1, 0, 0, 0, 0);
+  const end = new Date(ref.getFullYear(), ref.getMonth() + 1, 0, 23, 59, 59, 999);
+  return { start, end };
+};
+const formatDateTime = (iso?: string | null) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+};
 
-const DashboardScreen = ({ navigation, route }: Props) => {
-  const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [isPaused, setIsPaused] = useState<boolean>(false);
-  const videoRef = useRef<VideoRef>(null); // Use VideoRef type for the ref
+// --- Demo data (replace with API data/fetched state) ---
+type Employee = {
+  id: string;
+  name: string;
+  role: string;
+  avatarUrl?: string;
+  presentDays: number;     // this month through today
+  lastSeenISO?: string;    // last check-in/capture datetime ISO
+  streak: number;          // consecutive present days up to today
+};
 
-  // Use dummy videos if no video paths are passed; otherwise, use the passed video paths
-  const videoPaths = route.params?.videoPaths || [];
-  const videos = videoPaths.length > 0
-    ? videoPaths.map((path, index) => ({ id: String(index), title: `Recording ${index + 1}`, path }))
-    : [
-        { id: '1', title: 'Driver Recording 1', path: 'path/to/video1' },
-        { id: '2', title: 'Driver Recording 2', path: 'path/to/video2' },
-        { id: '3', title: 'Driver Recording 3', path: 'path/to/video3' },
-        { id: '4', title: 'Driver Recording 4', path: 'path/to/video4' },
-      ];
+const DashboardScreen = ({ navigation }: Props) => {
+  // You can swap this with data from your server/store
+  const employees: Employee[] = [
+    {
+      id: 'e1',
+      name: 'Aarav Sharma',
+      role: 'Driver',
+      avatarUrl: undefined,
+      presentDays: 18,
+      lastSeenISO: new Date().toISOString(),
+      streak: 3,
+    },
+    {
+      id: 'e2',
+      name: 'Neha Verma',
+      role: 'Driver',
+      presentDays: 20,
+      lastSeenISO: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
+      streak: 7,
+    },
+    {
+      id: 'e3',
+      name: 'Rohan Gupta',
+      role: 'Driver',
+      presentDays: 14,
+      lastSeenISO: new Date(Date.now() - 1000 * 60 * 60 * 26).toISOString(),
+      streak: 0,
+    },
+    {
+      id: 'e4',
+      name: 'Isha Nair',
+      role: 'Supervisor',
+      presentDays: 22,
+      lastSeenISO: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
+      streak: 10,
+    },
+  ];
 
-  const renderVideoItem = ({ item }: { item: { id: string; title: string; path: string } }) => (
-    <TouchableOpacity
-      style={styles.videoItem}
-      onPress={() => {
-        setSelectedVideo(item.path);
-        setError(null);
-        setIsPaused(false);
-      }}
-    >
-      <Text style={styles.videoText}>{item.title}</Text>
-    </TouchableOpacity>
-  );
+  const today = startOfToday();
+  const { start: monthStart } = getMonthBounds(today);
+  const daysSoFarThisMonth = today.getDate();
+
+  // Org-level summary from employees
+  const { avgPresencePct, totalPresentDays, totalEmployees, mostRecentSeenISO } = useMemo(() => {
+    const totalEmployees = employees.length || 1;
+    let totalPresentDays = 0;
+    let mostRecent: Date | null = null;
+
+    for (const e of employees) {
+      totalPresentDays += e.presentDays;
+      if (e.lastSeenISO) {
+        const d = new Date(e.lastSeenISO);
+        if (!mostRecent || d > mostRecent) mostRecent = d;
+      }
+    }
+
+    const avgPresencePct = Math.round(
+      (totalPresentDays / Math.max(1, totalEmployees * daysSoFarThisMonth)) * 100
+    );
+
+    return {
+      avgPresencePct,
+      totalPresentDays,
+      totalEmployees,
+      mostRecentSeenISO: mostRecent?.toISOString() ?? null,
+    };
+  }, [employees, daysSoFarThisMonth]);
+
+  const renderEmployee = ({ item }: { item: Employee }) => {
+    const absent = Math.max(0, daysSoFarThisMonth - item.presentDays);
+    const pct = Math.round((item.presentDays / Math.max(1, daysSoFarThisMonth)) * 100);
+
+    return (
+      <View style={styles.empCard}>
+        <View style={styles.empTopRow}>
+          <View style={styles.empLeft}>
+            <Avatar
+              rounded
+              size="medium"
+              source={item.avatarUrl ? { uri: item.avatarUrl } : undefined}
+              title={item.name.split(' ').map(s => s[0]).slice(0,2).join('').toUpperCase()}
+              titleStyle={{ color: '#0B1220', fontWeight: '800' }}
+              overlayContainerStyle={{ backgroundColor: '#67E8F9' }}
+            />
+            <View style={styles.empMeta}>
+              <Text style={styles.empName}>{item.name}</Text>
+              <Text style={styles.empRole}>{item.role}</Text>
+              <View style={styles.badgeRow}>
+                <View style={styles.badge}>
+                  <Icon name="calendar-check-o" type="font-awesome" size={12} color="#047857" />
+                  <Text style={styles.badgeText}>{item.presentDays} present</Text>
+                </View>
+                <View style={[styles.badge, { backgroundColor: 'rgba(239,68,68,0.1)', borderColor: '#EF4444' }]}>
+                  <Icon name="calendar-times-o" type="font-awesome" size={12} color="#EF4444" />
+                  <Text style={[styles.badgeText, { color: '#FCA5A5' }]}>{absent} absent</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.empRight}>
+            <Text style={styles.streakValue}>{item.streak}</Text>
+            <Text style={styles.streakLabel}>streak</Text>
+          </View>
+        </View>
+
+        <View style={styles.empProgressWrap}>
+          <View style={styles.empProgressBar}>
+            <View style={[styles.empProgressFill, { width: `${pct}%` }]} />
+          </View>
+          <Text style={styles.empProgressText}>{pct}% of days present</Text>
+        </View>
+
+        <View style={styles.empFooterRow}>
+          <View style={styles.metaItem}>
+            <Icon name="calendar" type="font-awesome" size={14} color="#64748B" />
+            <Text style={styles.metaText}>Month: {monthStart.toLocaleString('default', { month: 'long' })} {today.getFullYear()}</Text>
+          </View>
+          <View style={styles.metaItem}>
+            <Icon name="clock-o" type="font-awesome" size={14} color="#64748B" />
+            <Text style={styles.metaText}>Last seen: {formatDateTime(item.lastSeenISO)}</Text>
+          </View>
+        </View>
+      </View>
+    );
+  };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Your Videos</Text>
+      <ScrollView contentContainerStyle={styles.scrollPad}>
+        {/* Header */}
+        <Text style={styles.title}>Dashboard</Text>
 
-      {selectedVideo ? (
-        <>
-          <View style={{ width: '100%', height: height * 0.5, backgroundColor: '#000' }}>
-            <Video
-              ref={videoRef}
-              source={{ uri: selectedVideo }}
-              style={{ width: '100%', height: '100%' }}
-              controls={true}
-              paused={isPaused}
-              resizeMode="contain"
-              onError={(error) => {
-                console.error('Video playback error:', error);
-                setError('Failed to play video. It might be corrupted or inaccessible.');
-              }}
-              onLoad={() => setError(null)}
-              onEnd={() => setIsPaused(true)}
-            />
-            {error && (
-              <View style={styles.errorContainer}>
-                <Text style={styles.errorText}>{error}</Text>
-              </View>
-            )}
+        {/* Org Attendance Summary */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Attendance Overview</Text>
+            <Text style={styles.sectionSubtitle}>
+              {monthStart.toLocaleString('default', { month: 'long' })} {today.getFullYear()}
+            </Text>
           </View>
-          <View style={styles.buttonRow}>
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={() => setIsPaused((prev) => !prev)}
-            >
-              <Icon
-                name={isPaused ? 'play' : 'pause'}
-                type="font-awesome"
-                size={20}
-                color="#FFF"
-              />
-              <Text style={styles.controlButtonText}>{isPaused ? 'Play' : 'Pause'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={() => {
-                setSelectedVideo(null);
-                setError(null);
-                setIsPaused(false);
-              }}
-            >
-              <Icon name="arrow-left" type="font-awesome" size={20} color="#FFF" />
-              <Text style={styles.controlButtonText}>Back to List</Text>
-            </TouchableOpacity>
+
+          <View style={styles.statsRow}>
+            <View style={styles.statCard}>
+              <Text style={styles.statValue}>{avgPresencePct}%</Text>
+              <Text style={styles.statLabel}>Avg Presence</Text>
+            </View>
+            <View style={styles.statCard}>
+              <Text style={styles.statValue}>{totalPresentDays}</Text>
+              <Text style={styles.statLabel}>Total Present Days</Text>
+            </View>
+            <View style={styles.statCard}>
+              <Text style={styles.statValue}>{totalEmployees}</Text>
+              <Text style={styles.statLabel}>Employees</Text>
+            </View>
           </View>
-        </>
-      ) : (
-        <>
-          <FlatList
-            data={videos}
-            keyExtractor={(item) => item.id}
-            renderItem={renderVideoItem}
-            contentContainerStyle={styles.list}
-          />
-          <TouchableOpacity onPress={() => navigation.navigate('Home')} style={styles.backButton}>
-            <Text style={styles.backText}>Back to Home</Text>
-          </TouchableOpacity>
-        </>
-      )}
+
+          <View style={styles.metaRow}>
+            <View style={styles.metaItem}>
+              <Icon name="calendar" type="font-awesome" size={16} color="#64748B" />
+              <Text style={styles.metaText}>
+                Range: {monthStart.toLocaleDateString()} – {today.toLocaleDateString()}
+              </Text>
+            </View>
+            <View style={styles.metaItem}>
+              <Icon name="clock-o" type="font-awesome" size={16} color="#64748B" />
+              <Text style={styles.metaText}>Last activity: {formatDateTime(mostRecentSeenISO)}</Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Employees List */}
+        <Text style={styles.subTitle}>Employees</Text>
+        <FlatList
+          data={employees}
+          keyExtractor={(e) => e.id}
+          renderItem={renderEmployee}
+          contentContainerStyle={styles.list}
+          scrollEnabled={false}
+          ListEmptyComponent={
+            <View style={styles.emptyWrap}>
+              <Icon name="users" type="font-awesome" size={18} color="#94A3B8" />
+              <Text style={styles.emptyText}>No employees found.</Text>
+            </View>
+          }
+        />
+
+        <TouchableOpacity onPress={() => navigation.navigate('Home')} style={styles.backButton} activeOpacity={0.9}>
+          <Text style={styles.backText}>Back to Home</Text>
+        </TouchableOpacity>
+      </ScrollView>
     </View>
   );
 };

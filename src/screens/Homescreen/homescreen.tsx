@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -9,80 +9,55 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { Camera, useCameraDevices, VideoFile } from 'react-native-vision-camera';
+import { Camera, useCameraDevices, PhotoFile } from 'react-native-vision-camera';
 import { Icon } from 'react-native-elements';
 import { check, request, PERMISSIONS, RESULTS, openSettings } from 'react-native-permissions';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import RNFS from 'react-native-fs'; // Import react-native-fs for file management
 import { styles } from '../Homescreen/homescreen.styles';
 
-// Define the type for the navigation stack
+// ======= CONFIG: set your VPS endpoint here =======
+const VPS_UPLOAD_URL = 'https://YOUR_VPS_UPLOAD_ENDPOINT/upload';
+// ================================================
+
 type RootStackParamList = {
   Signup: undefined;
   OTP: undefined;
   Home: undefined;
-  Login: undefined;
-  Dashboard: { videoPaths?: string[] };
+  Dashboard: { imagePaths?: string[] } | undefined;
 };
 
-// Define the navigation prop type
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
 const HomeScreen = ({ navigation }: Props) => {
-  const [hasPermission, setHasPermission] = useState<boolean>(false);
-  const [permissionAsked, setPermissionAsked] = useState<boolean>(false);
-  const [recording, setRecording] = useState<boolean>(false);
-  const [cameraReady, setCameraReady] = useState<boolean>(false);
-  const [showPermissionModal, setShowPermissionModal] = useState<boolean>(false);
-  const [cameraPosition, setCameraPosition] = useState<'back' | 'front'>('back');
-  const [torch, setTorch] = useState<'on' | 'off'>('off');
-  const [videoPaths, setVideoPaths] = useState<string[]>([]); // Store video paths
+  const [hasPermission, setHasPermission] = useState(false);
+  const [permissionAsked, setPermissionAsked] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [showPermissionModal, setShowPermissionModal] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [imagePaths, setImagePaths] = useState<string[]>([]);
 
   const camera = useRef<Camera>(null);
+
+  // In your setup, devices is an array
   const devices = useCameraDevices();
-  const device = devices.find((d) => d.position === cameraPosition);
+  const device = Array.isArray(devices)
+    ? devices.find((d) => d.position === 'front')
+    : undefined;
 
-  // Load saved video paths on component mount
-  useEffect(() => {
-    const loadVideos = async () => {
-      try {
-        const videoDir = `${RNFS.DocumentDirectoryPath}/recordedVideos`;
-        const exists = await RNFS.exists(videoDir);
-        if (!exists) {
-          await RNFS.mkdir(videoDir);
-        }
-        const files = await RNFS.readdir(videoDir);
-        const videoFiles = files
-          .filter((file) => file.endsWith('.mp4'))
-          .map((file) => `${videoDir}/${file}`);
-        setVideoPaths(videoFiles);
-      } catch (error) {
-        console.error('Error loading videos:', error);
-        Alert.alert('Error', 'Failed to load saved videos.');
-      }
-    };
-    loadVideos();
-  }, []);
-
-  // Check current permission status
+  // ---- Permissions (Camera only; no microphone needed) ----
   const checkPermissions = async () => {
     try {
       let cameraStatus;
-      let micStatus;
 
       if (Platform.OS === 'android') {
         cameraStatus = await check(PERMISSIONS.ANDROID.CAMERA);
-        micStatus = await check(PERMISSIONS.ANDROID.RECORD_AUDIO);
       } else {
         cameraStatus = await check(PERMISSIONS.IOS.CAMERA);
-        micStatus = await check(PERMISSIONS.IOS.MICROPHONE);
       }
 
-      if (cameraStatus === RESULTS.GRANTED && micStatus === RESULTS.GRANTED) {
+      if (cameraStatus === RESULTS.GRANTED) {
         const cameraPermission = await Camera.getCameraPermissionStatus();
-        const microphonePermission = await Camera.getMicrophonePermissionStatus();
-
-        if (cameraPermission === 'granted' && microphonePermission === 'granted') {
+        if (cameraPermission === 'granted') {
           setHasPermission(true);
         } else {
           setHasPermission(false);
@@ -99,34 +74,28 @@ const HomeScreen = ({ navigation }: Props) => {
     }
   };
 
-  // Request system and VisionCamera permissions
   const requestSystemPermissions = async () => {
     try {
       let cameraStatus;
-      let micStatus;
 
       if (Platform.OS === 'android') {
         cameraStatus = await request(PERMISSIONS.ANDROID.CAMERA);
-        micStatus = await request(PERMISSIONS.ANDROID.RECORD_AUDIO);
       } else {
         cameraStatus = await request(PERMISSIONS.IOS.CAMERA);
-        micStatus = await request(PERMISSIONS.IOS.MICROPHONE);
       }
 
-      if (cameraStatus === RESULTS.GRANTED && micStatus === RESULTS.GRANTED) {
+      if (cameraStatus === RESULTS.GRANTED) {
         const cameraPermission = await Camera.requestCameraPermission();
-        const microphonePermission = await Camera.requestMicrophonePermission();
-
-        if (cameraPermission === 'granted' && microphonePermission === 'granted') {
+        if (cameraPermission === 'granted') {
           setHasPermission(true);
         } else {
           setHasPermission(false);
-          Alert.alert('Permission Denied', 'Camera and Microphone access are required.');
+          Alert.alert('Permission Denied', 'Camera access is required.');
         }
-      } else if (cameraStatus === RESULTS.BLOCKED || micStatus === RESULTS.BLOCKED) {
+      } else if (cameraStatus === RESULTS.BLOCKED) {
         Alert.alert(
-          'Permissions Blocked',
-          'Camera and Microphone access are blocked. Please enable them in Settings.',
+          'Permission Blocked',
+          'Camera access is blocked. Please enable it in Settings.',
           [
             { text: 'Cancel', style: 'cancel' },
             { text: 'Open Settings', onPress: () => openSettings() },
@@ -141,7 +110,6 @@ const HomeScreen = ({ navigation }: Props) => {
     }
   };
 
-  // Handle user's permission choice
   const handlePermissionRequest = async (option: 'allow' | 'onlyThisTime' | 'deny') => {
     setShowPermissionModal(false);
     if (option === 'deny') {
@@ -152,10 +120,10 @@ const HomeScreen = ({ navigation }: Props) => {
     await checkPermissions();
   };
 
-  // Start or stop recording
-  const handleStartRecording = async () => {
+  // ---- Capture + Upload (no video recording) ----
+  const handleCaptureImage = async () => {
     if (!device || !cameraReady) {
-      Alert.alert('Camera not ready', 'Please wait until camera is ready...');
+      Alert.alert('Camera not ready', 'Please wait until the camera is ready...');
       return;
     }
 
@@ -165,83 +133,76 @@ const HomeScreen = ({ navigation }: Props) => {
     }
 
     try {
-      if (!recording) {
-        const videoDir = `${RNFS.DocumentDirectoryPath}/recordedVideos`;
-        const exists = await RNFS.exists(videoDir);
-        if (!exists) {
-          await RNFS.mkdir(videoDir);
-        }
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filePath = `${videoDir}/video-${timestamp}.mp4`;
+      setCapturing(true);
 
-        await camera.current?.startRecording({
-          fileType: 'mp4', // Ensure MP4 format
-          videoCodec: 'h264', // Use H.264 for compatibility
-          onRecordingFinished: async (video: VideoFile) => {
-            try {
-              // Move the recorded video to the desired location
-              await RNFS.moveFile(video.path, filePath);
-              console.log('Recording saved to:', filePath);
-              Alert.alert('Recording Saved', `Saved to: ${filePath}`);
-              setVideoPaths((prev) => [...prev, filePath]); // Add new video path
-              setRecording(false);
-            } catch (error) {
-              console.error('Error saving video:', error);
-              Alert.alert('Error', 'Failed to save video.');
-              setRecording(false);
-            }
-          },
-          onRecordingError: (error) => {
-            console.error('Recording error:', error);
-            Alert.alert('Recording Error', error.message);
-            setRecording(false);
-          },
-        });
-        setRecording(true);
-      } else {
-        await camera.current?.stopRecording();
-        setRecording(false);
+      // Keep takePhoto options minimal to match your typings
+      const photo: PhotoFile | undefined = await camera.current?.takePhoto({});
+
+      if (!photo?.path) {
+        setCapturing(false);
+        Alert.alert('Error', 'Failed to capture image.');
+        return;
       }
-    } catch (error) {
-      console.error('Error starting/stopping recording:', error);
-      Alert.alert('Error', 'Failed to manage recording.');
-      setRecording(false);
+
+      setImagePaths((prev) => [...prev, photo.path]);
+
+      const fileUri = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
+      const filename = `frame-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+
+      const form = new FormData();
+      // RN's FormData file typing is loose; cast as any to satisfy TS
+      form.append(
+        'file',
+        {
+          uri: fileUri,
+          name: filename,
+          type: 'image/jpeg',
+        } as any
+      );
+
+      const res = await fetch(VPS_UPLOAD_URL, {
+        method: 'POST',
+        // Let RN set the multipart boundary automatically
+        body: form,
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Upload failed (${res.status}): ${text}`);
+      }
+
+      Alert.alert('Uploaded', 'Frame captured and sent to server.');
+    } catch (error: any) {
+      console.error('Capture/Upload error:', error);
+      Alert.alert('Upload Error', error?.message ?? 'Failed to upload image.');
+    } finally {
+      setCapturing(false);
     }
   };
 
-  // Toggle camera position
-  const toggleCameraPosition = () => {
-    setCameraPosition((prev) => (prev === 'back' ? 'front' : 'back'));
-  };
-
-  // Toggle torch
-  const toggleTorch = () => {
-    setTorch((prev) => (prev === 'on' ? 'off' : 'on'));
-  };
-
-  // Initial permission check
   useEffect(() => {
     if (!permissionAsked) {
       checkPermissions();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Render permission screen if permissions are not granted
+  // ---- Early UI returns ----
   if (!permissionAsked || !hasPermission) {
     return (
       <View style={styles.container}>
-        <Text style={styles.title}>Driver Safety System</Text>
+        <Text style={styles.title}>Mark your Attendance</Text>
         {!hasPermission && (
           <Modal
-            transparent={true}
+            transparent
             visible={showPermissionModal}
             animationType="fade"
             onRequestClose={() => setShowPermissionModal(false)}
           >
             <View style={styles.modalOverlay}>
               <View style={styles.modalContent}>
-                <Icon name="mic" type="font-awesome" size={40} color="#00AEEF" style={styles.modalIcon} />
-                <Text style={styles.modalTitle}>Allow adas_system to record audio?</Text>
+                <Icon name="camera" type="font-awesome" size={40} color="#00AEEF" style={styles.modalIcon} />
+                <Text style={styles.modalTitle}>Allow adas_system to use the camera?</Text>
                 <Text style={styles.modalSubtitle}>While using the app</Text>
                 <TouchableOpacity style={styles.modalButton} onPress={() => handlePermissionRequest('allow')}>
                   <Text style={styles.modalButtonText}>WHILE USING THE APP</Text>
@@ -256,16 +217,23 @@ const HomeScreen = ({ navigation }: Props) => {
             </View>
           </Modal>
         )}
-        <TouchableOpacity style={styles.card} onPress={handleStartRecording} activeOpacity={0.8} disabled={!hasPermission}>
-          <Icon name="video" size={40} color="#1F2937" style={{ marginBottom: 10 }} />
-          <Text style={styles.cardTitle}>{hasPermission ? 'Start Recording' : 'Permissions Required'}</Text>
+
+        <TouchableOpacity
+          style={styles.card}
+          onPress={handleCaptureImage}
+          activeOpacity={0.8}
+          disabled={!hasPermission}
+        >
+          <Icon name="camera" size={40} color="#1F2937" style={{ marginBottom: 10 }} />
+          <Text style={styles.cardTitle}>{hasPermission ? 'Capture Image' : 'Permissions Required'}</Text>
           <Text style={styles.cardSubtitle}>
-            {hasPermission ? "Monitor driver's drowsiness in real-time" : 'Please grant permissions'}
+            {hasPermission ? 'Capture a frame and send to server' : 'Please grant camera permission'}
           </Text>
         </TouchableOpacity>
+
         <TouchableOpacity
           style={[styles.card, { marginTop: 20 }]}
-          onPress={() => navigation.navigate('Dashboard', { videoPaths })}
+          onPress={() => navigation.navigate('Dashboard', { imagePaths })}
           activeOpacity={0.8}
         >
           <Icon name="dashboard" size={40} color="#1F2937" style={{ marginBottom: 10 }} />
@@ -276,7 +244,6 @@ const HomeScreen = ({ navigation }: Props) => {
     );
   }
 
-  // Render loading screen if no camera device
   if (!device) {
     return (
       <View style={styles.container}>
@@ -286,7 +253,7 @@ const HomeScreen = ({ navigation }: Props) => {
     );
   }
 
-  // Render camera view with controls
+  // ---- Main camera view (front camera, photo only) ----
   return (
     <View style={{ flex: 1 }}>
       <Camera
@@ -294,36 +261,38 @@ const HomeScreen = ({ navigation }: Props) => {
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={true}
-        video={true}
-        audio={true}
-        torch={torch}
+        photo={true}
         onInitialized={() => setCameraReady(true)}
         onError={(error) => {
           console.error('Camera Error:', error);
           Alert.alert('Camera Error', error.message);
         }}
       />
+
       <View style={styles.controlOverlay}>
-        <Text style={styles.title}>Driver Safety System</Text>
+        <Text style={styles.title}>Mark Your Attendance</Text>
+
         <View style={styles.controlPanel}>
-          <TouchableOpacity style={styles.controlButton} onPress={toggleCameraPosition} activeOpacity={0.8}>
-            <Icon name="camera-switch" size={30} color="#FFF" />
-            <Text style={styles.controlButtonText}>Switch Camera</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.controlButton} onPress={toggleTorch} activeOpacity={0.8}>
-            <Icon name="flash" size={30} color="#FFF" />
-            <Text style={styles.controlButtonText}>{torch === 'on' ? 'Turn Off Torch' : 'Turn On Torch'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.actionButton} onPress={handleStartRecording} activeOpacity={0.8}>
-            <Icon name={recording ? 'stop' : 'video'} size={40} color="#FFF" style={{ marginBottom: 10 }} />
-            <Text style={styles.actionButtonText}>{recording ? 'Stop Recording' : 'Start Recording'}</Text>
-            <Text style={styles.actionButtonSubtitle}>
-              {recording ? 'Recording in progress' : "Monitor driver's drowsiness in real-time"}
-            </Text>
-          </TouchableOpacity>
+          {/* Always front camera; removed switch + torch */}
+
           <TouchableOpacity
             style={styles.actionButton}
-            onPress={() => navigation.navigate('Dashboard', { videoPaths })}
+            onPress={handleCaptureImage}
+            activeOpacity={0.8}
+            disabled={capturing}
+          >
+            <Icon name="camera" size={40} color="#FFF" style={{ marginBottom: 10 }} />
+            <Text style={styles.actionButtonText}>
+              {capturing ? 'Capturing...' : 'Capture Image'}
+            </Text>
+            <Text style={styles.actionButtonSubtitle}>
+              {capturing ? 'Processing & uploading' : 'Send current frame to server'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => navigation.navigate('Dashboard', { imagePaths })}
             activeOpacity={0.8}
           >
             <Icon name="dashboard" size={40} color="#FFF" style={{ marginBottom: 10 }} />
