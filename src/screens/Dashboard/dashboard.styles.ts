@@ -234,4 +234,32 @@ export const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+  topBarCentered: {
+  marginBottom: 16,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+largeAddButton: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 10,
+  paddingHorizontal: 18,
+  paddingVertical: 12,
+  borderRadius: 999,
+  backgroundColor: '#7DD3FC', // bright accent that matches your theme
+  borderWidth: 2,
+  borderColor: '#1E293B',
+  shadowColor: '#000',
+  shadowOpacity: 0.25,
+  shadowRadius: 8,
+  elevation: 4,
+},
+
+largeAddText: {
+  color: '#0B1220',
+  fontWeight: '900',
+  letterSpacing: 0.3,
+  fontSize: 14,
+},
 });

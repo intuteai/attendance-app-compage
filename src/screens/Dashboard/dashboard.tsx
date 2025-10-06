@@ -3,14 +3,8 @@ import { View, Text, FlatList, TouchableOpacity, ScrollView } from 'react-native
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Icon, Avatar } from 'react-native-elements';
 import { styles } from './dashboard.styles';
+import { RootStackParamList } from '../../../navigation/types';
 
-type RootStackParamList = {
-  Signup: undefined;
-  OTP: undefined;
-  Home: undefined;
-  Login: undefined;
-  Dashboard: undefined;
-};
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Dashboard'>;
 
@@ -43,7 +37,8 @@ type Employee = {
   streak: number;          // consecutive present days up to today
 };
 
-const DashboardScreen = ({ navigation }: Props) => {
+const DashboardScreen: React.FC<Props> = ({ navigation, route }) => {
+  const imagePaths = route.params?.imagePaths ?? [];
   // You can swap this with data from your server/store
   const employees: Employee[] = [
     {
@@ -173,8 +168,20 @@ const DashboardScreen = ({ navigation }: Props) => {
   return (
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollPad}>
-        {/* Header */}
-        <Text style={styles.title}>Dashboard</Text>
+
+        {/* Top Bar */}
+      <View style={styles.topBarCentered}>
+  <TouchableOpacity
+    onPress={() => navigation.navigate('AddEmployee')}
+    style={styles.largeAddButton}
+    activeOpacity={0.92}
+    accessibilityRole="button"
+    accessibilityLabel="Add employee"
+  >
+    <Icon name="user-plus" type="font-awesome" size={18} color="#0B1220" />
+    <Text style={styles.largeAddText}>Add Employee</Text>
+  </TouchableOpacity>
+</View>
 
         {/* Org Attendance Summary */}
         <View style={styles.section}>

@@ -14,28 +14,25 @@ import { Icon } from 'react-native-elements';
 import { check, request, PERMISSIONS, RESULTS, openSettings } from 'react-native-permissions';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { styles } from '../Homescreen/homescreen.styles';
-
+import { RootStackParamList } from '../../../navigation/types'
+import { useIsFocused } from '@react-navigation/native';
 // ======= CONFIG: set your VPS endpoint here =======
 const VPS_UPLOAD_URL = 'https://YOUR_VPS_UPLOAD_ENDPOINT/upload';
 // ================================================
 
-type RootStackParamList = {
-  Signup: undefined;
-  OTP: undefined;
-  Home: undefined;
-  Dashboard: { imagePaths?: string[] } | undefined;
-};
+
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
-const HomeScreen = ({ navigation }: Props) => {
+
+const HomeScreen: React.FC<Props> = ({ navigation }) => {
   const [hasPermission, setHasPermission] = useState(false);
   const [permissionAsked, setPermissionAsked] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [imagePaths, setImagePaths] = useState<string[]>([]);
-
+const isFocused = useIsFocused();
   const camera = useRef<Camera>(null);
 
   // In your setup, devices is an array
@@ -260,7 +257,7 @@ const HomeScreen = ({ navigation }: Props) => {
         ref={camera}
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={true}
+        isActive={isFocused}
         photo={true}
         onInitialized={() => setCameraReady(true)}
         onError={(error) => {
