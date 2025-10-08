@@ -1,17 +1,55 @@
-import React, { useMemo } from 'react';
-import { View, Text, FlatList, TouchableOpacity, ScrollView } from 'react-native';
+import React, { useCallback, useMemo, useState } from 'react';
+import {
+  View,
+  Text,
+  FlatList,
+  TouchableOpacity,
+  ScrollView,
+  SafeAreaView,
+  RefreshControl,
+} from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Icon, Avatar } from 'react-native-elements';
 import { styles } from './dashboard.styles';
 import { RootStackParamList } from '../../../navigation/types';
 
+// import Config from 'react-native-config';
+// const API_BASE_URL = Config.API_BASE_URL;
+const API_BASE_URL = 'erp-database-instance.c3y46ues4aqu.ap-south-1.rds.amazonaws.com'; // <-- set me
+const AUTH_TOKEN = ''; // e.g. 'Bearer eyJ...' if required
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Dashboard'>;
 
-// --- Helpers ---
+type Employee = {
+  id: string;
+  name: string;
+  role: string;
+  avatarUrl?: string;
+};
+
+type AttendanceRecord = {
+  employeeId: string;
+  date: string;      // YYYY-MM-DD
+  timestamp?: string; // ISO
+};
+
+// computed UI type
+type UIEmployee = Employee & {
+  presentDays: number;
+  streak: number;
+  lastSeenISO?: string;
+};
+
+// --- helpers ---
 const startOfToday = () => {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
+  return d;
+};
+const endOfToday = () => {
+  const d = new Date();
+  d.setHours(23, 59, 59, 999);
   return d;
 };
 const getMonthBounds = (ref: Date) => {
@@ -25,114 +63,239 @@ const formatDateTime = (iso?: string | null) => {
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
 };
-
-// --- Demo data (replace with API data/fetched state) ---
-type Employee = {
-  id: string;
-  name: string;
-  role: string;
-  avatarUrl?: string;
-  presentDays: number;     // this month through today
-  lastSeenISO?: string;    // last check-in/capture datetime ISO
-  streak: number;          // consecutive present days up to today
+const hoursSince = (iso?: string | null) => {
+  if (!iso) return Number.POSITIVE_INFINITY;
+  const d = new Date(iso).getTime();
+  const now = Date.now();
+  return (now - d) / (1000 * 60 * 60);
+};
+const presenceColor = (pct: number) => {
+  if (pct >= 90) return '#22C55E';
+  if (pct >= 75) return '#06B6D4';
+  if (pct >= 50) return '#F59E0B';
+  return '#EF4444';
 };
 
-const DashboardScreen: React.FC<Props> = ({ navigation, route }) => {
-  const imagePaths = route.params?.imagePaths ?? [];
-  // You can swap this with data from your server/store
-  const employees: Employee[] = [
-    {
-      id: 'e1',
-      name: 'Aarav Sharma',
-      role: 'Driver',
-      avatarUrl: undefined,
-      presentDays: 18,
-      lastSeenISO: new Date().toISOString(),
-      streak: 3,
-    },
-    {
-      id: 'e2',
-      name: 'Neha Verma',
-      role: 'Driver',
-      presentDays: 20,
-      lastSeenISO: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
-      streak: 7,
-    },
-    {
-      id: 'e3',
-      name: 'Rohan Gupta',
-      role: 'Driver',
-      presentDays: 14,
-      lastSeenISO: new Date(Date.now() - 1000 * 60 * 60 * 26).toISOString(),
-      streak: 0,
-    },
-    {
-      id: 'e4',
-      name: 'Isha Nair',
-      role: 'Supervisor',
-      presentDays: 22,
-      lastSeenISO: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-      streak: 10,
-    },
-  ];
+// Ranges
+type RangeKey = 'THIS_MONTH' | 'LAST_7' | 'LAST_30' | 'LAST_90';
+const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
+  { key: 'THIS_MONTH', label: 'This month' },
+  { key: 'LAST_7', label: 'Last 7' },
+  { key: 'LAST_30', label: 'Last 30' },
+  { key: 'LAST_90', label: 'Last 90' },
+];
 
+const getRangeBounds = (key: RangeKey) => {
   const today = startOfToday();
-  const { start: monthStart } = getMonthBounds(today);
-  const daysSoFarThisMonth = today.getDate();
+  const end = endOfToday();
+  if (key === 'THIS_MONTH') {
+    const { start } = getMonthBounds(today);
+    return { start, end };
+  }
+  const days = key === 'LAST_7' ? 7 : key === 'LAST_30' ? 30 : 90;
+  const start = new Date(today);
+  start.setDate(start.getDate() - (days - 1));
+  start.setHours(0, 0, 0, 0);
+  return { start, end };
+};
 
-  // Org-level summary from employees
-  const { avgPresencePct, totalPresentDays, totalEmployees, mostRecentSeenISO } = useMemo(() => {
-    const totalEmployees = employees.length || 1;
-    let totalPresentDays = 0;
-    let mostRecent: Date | null = null;
+const DashboardScreen: React.FC<Props> = ({ navigation }) => {
+  const [rangeKey, setRangeKey] = useState<RangeKey>('THIS_MONTH');
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-    for (const e of employees) {
-      totalPresentDays += e.presentDays;
-      if (e.lastSeenISO) {
-        const d = new Date(e.lastSeenISO);
-        if (!mostRecent || d > mostRecent) mostRecent = d;
+  const fetchEmployees = useCallback(async () => {
+    // ✅ headers as a concrete Record
+    const headers: Record<string, string> = {};
+    if (AUTH_TOKEN) headers.Authorization = AUTH_TOKEN;
+
+    const res = await fetch(`${API_BASE_URL}/employees`, { headers });
+    const isJSON = (res.headers.get('content-type') || '').includes('application/json');
+    const payload = isJSON ? await res.json().catch(() => []) : [];
+    if (!res.ok) throw new Error(typeof payload === 'string' ? payload : payload?.message || 'Fetch employees failed');
+    // Normalize fields (server may return fullName or name)
+    const normalized: Employee[] = (payload as any[]).map((e) => ({
+      id: String(e.id),
+      name: e.name || e.fullName || '',
+      role: e.role || 'Employee',
+      avatarUrl: e.avatarUrl || undefined,
+    }));
+    return normalized;
+  }, []);
+
+  const fetchAttendance = useCallback(async (start: Date, end: Date) => {
+    const qs = new URLSearchParams({
+      start: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`,
+      end: `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`,
+    }).toString();
+
+    const headers: Record<string, string> = {};
+    if (AUTH_TOKEN) headers.Authorization = AUTH_TOKEN;
+
+    const res = await fetch(`${API_BASE_URL}/attendance?${qs}`, { headers });
+
+    const isJSON = (res.headers.get('content-type') || '').includes('application/json');
+    const payload = isJSON ? await res.json().catch(() => []) : [];
+    if (!res.ok) throw new Error(typeof payload === 'string' ? payload : payload?.message || 'Fetch attendance failed');
+
+    const normalized: AttendanceRecord[] = (payload as any[]).map((r) => ({
+      employeeId: String(r.employeeId),
+      date: r.date,
+      timestamp: r.timestamp || undefined,
+    }));
+    return normalized;
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { start, end } = getRangeBounds(rangeKey);
+      const [emps, att] = await Promise.all([fetchEmployees(), fetchAttendance(start, end)]);
+      setEmployees(emps);
+      setAttendance(att);
+    } catch (e: any) {
+      console.error(e);
+      // optionally show a toast
+    } finally {
+      setLoading(false);
+    }
+  }, [rangeKey, fetchEmployees, fetchAttendance]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
+
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
+
+  const { start: rangeStart, end: rangeEnd } = useMemo(() => getRangeBounds(rangeKey), [rangeKey]);
+
+  const daysInRange = useMemo(() => {
+    const diff = Math.ceil((rangeEnd.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24));
+    return Math.max(1, diff);
+  }, [rangeStart, rangeEnd]);
+
+  // Index attendance by employee (already range-filtered by API)
+  const attendanceByEmp = useMemo(() => {
+    const map = new Map<string, AttendanceRecord[]>();
+    for (const r of attendance) {
+      if (!map.has(r.employeeId)) map.set(r.employeeId, []);
+      map.get(r.employeeId)!.push(r);
+    }
+    // sort desc by timestamp
+    for (const arr of map.values()) arr.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    return map;
+  }, [attendance]);
+
+  const uiEmployees: UIEmployee[] = useMemo(() => {
+    return employees.map((e) => {
+      const records = attendanceByEmp.get(e.id) ?? [];
+      // Unique days present in range
+      const uniqueDays = new Set<string>();
+      for (const r of records) uniqueDays.add(r.date);
+      const presentDays = uniqueDays.size;
+
+      // Streak is approximated using range data; for true streak, fetch full history.
+      let streak = 0;
+      const byDate = new Set(records.map(r => r.date));
+      const cursor = startOfToday();
+      while (true) {
+        const y = cursor.getFullYear();
+        const m = String(cursor.getMonth() + 1).padStart(2, '0');
+        const d = String(cursor.getDate()).padStart(2, '0');
+        const key = `${y}-${m}-${d}`;
+        if (byDate.has(key)) {
+          streak += 1;
+          cursor.setDate(cursor.getDate() - 1);
+        } else {
+          break;
+        }
+      }
+
+      const lastSeenISO = records.length
+        ? records[0].timestamp ?? `${records[0].date}T00:00:00.000Z`
+        : undefined;
+
+      return { ...e, presentDays, streak, lastSeenISO };
+    });
+  }, [employees, attendanceByEmp]);
+
+  const orgStats = useMemo(() => {
+    const totalEmployees = employees.length;
+    const totalPresentDays = uiEmployees.reduce((sum, e) => sum + e.presentDays, 0);
+    const avgPresencePct = totalEmployees
+      ? Math.round((totalPresentDays / Math.max(1, totalEmployees * daysInRange)) * 100)
+      : 0;
+
+    let mostRecent: string | null = null;
+    for (const e of uiEmployees) {
+      if (e.lastSeenISO && (!mostRecent || new Date(e.lastSeenISO) > new Date(mostRecent))) {
+        mostRecent = e.lastSeenISO;
       }
     }
 
-    const avgPresencePct = Math.round(
-      (totalPresentDays / Math.max(1, totalEmployees * daysSoFarThisMonth)) * 100
-    );
+    const today = startOfToday();
+    const { start: monthStart } = getMonthBounds(today);
+    const monthStartLabel = monthStart.toLocaleString('default', { month: 'long' });
+    const yearLabel = String(today.getFullYear());
 
     return {
-      avgPresencePct,
-      totalPresentDays,
       totalEmployees,
-      mostRecentSeenISO: mostRecent?.toISOString() ?? null,
+      totalPresentDays,
+      avgPresencePct,
+      mostRecentSeenISO: mostRecent,
+      monthStartLabel,
+      yearLabel,
     };
-  }, [employees, daysSoFarThisMonth]);
+  }, [uiEmployees, employees.length, daysInRange]);
 
-  const renderEmployee = ({ item }: { item: Employee }) => {
-    const absent = Math.max(0, daysSoFarThisMonth - item.presentDays);
-    const pct = Math.round((item.presentDays / Math.max(1, daysSoFarThisMonth)) * 100);
+  const renderEmp = ({ item }: { item: UIEmployee }) => {
+    const pct = Math.round((item.presentDays / Math.max(1, daysInRange)) * 100);
+    const activeNow = hoursSince(item.lastSeenISO) <= 1;
 
     return (
-      <View style={styles.empCard}>
+      <View style={styles.empCard} accessibilityRole="summary">
         <View style={styles.empTopRow}>
           <View style={styles.empLeft}>
-            <Avatar
-              rounded
-              size="medium"
-              source={item.avatarUrl ? { uri: item.avatarUrl } : undefined}
-              title={item.name.split(' ').map(s => s[0]).slice(0,2).join('').toUpperCase()}
-              titleStyle={{ color: '#0B1220', fontWeight: '800' }}
-              overlayContainerStyle={{ backgroundColor: '#67E8F9' }}
-            />
+            <View style={styles.avatarWrap}>
+              <Avatar
+                rounded
+                size="medium"
+                source={item.avatarUrl ? { uri: item.avatarUrl } : undefined}
+                title={item.name.split(' ').map((s: string) => s[0]).slice(0,2).join('').toUpperCase()}
+                titleStyle={styles.avatarTitle}
+                overlayContainerStyle={styles.avatarOverlay}
+              />
+              <View style={[styles.statusDot, { backgroundColor: activeNow ? '#22C55E' : '#64748B' }]} />
+            </View>
+
             <View style={styles.empMeta}>
-              <Text style={styles.empName}>{item.name}</Text>
-              <Text style={styles.empRole}>{item.role}</Text>
+              <Text style={styles.empName} numberOfLines={1}>{item.name}</Text>
+              <View style={styles.roleRow}>
+                <Icon name="id-badge" type="font-awesome" size={12} color="#93C5FD" />
+                <Text style={styles.empRole}>{item.role}</Text>
+              </View>
+
               <View style={styles.badgeRow}>
-                <View style={styles.badge}>
-                  <Icon name="calendar-check-o" type="font-awesome" size={12} color="#047857" />
-                  <Text style={styles.badgeText}>{item.presentDays} present</Text>
+                <View style={styles.badgePositive}>
+                  <Icon name="calendar-check-o" type="font-awesome" size={12} color="#065F46" />
+                  <Text style={styles.badgePositiveText}>{item.presentDays} present</Text>
                 </View>
-                <View style={[styles.badge, { backgroundColor: 'rgba(239,68,68,0.1)', borderColor: '#EF4444' }]}>
-                  <Icon name="calendar-times-o" type="font-awesome" size={12} color="#EF4444" />
-                  <Text style={[styles.badgeText, { color: '#FCA5A5' }]}>{absent} absent</Text>
+                <View style={styles.badgeNegative}>
+                  <Icon name="calendar-times-o" type="font-awesome" size={12} color="#7F1D1D" />
+                  <Text style={styles.badgeNegativeText}>
+                    {Math.max(0, daysInRange - item.presentDays)} absent
+                  </Text>
                 </View>
               </View>
             </View>
@@ -144,21 +307,17 @@ const DashboardScreen: React.FC<Props> = ({ navigation, route }) => {
           </View>
         </View>
 
+        {/* Progress */}
         <View style={styles.empProgressWrap}>
           <View style={styles.empProgressBar}>
-            <View style={[styles.empProgressFill, { width: `${pct}%` }]} />
+            <View style={[styles.empProgressFill, { width: `${pct}%`, backgroundColor: presenceColor(pct) }]} />
           </View>
-          <Text style={styles.empProgressText}>{pct}% of days present</Text>
-        </View>
-
-        <View style={styles.empFooterRow}>
-          <View style={styles.metaItem}>
-            <Icon name="calendar" type="font-awesome" size={14} color="#64748B" />
-            <Text style={styles.metaText}>Month: {monthStart.toLocaleString('default', { month: 'long' })} {today.getFullYear()}</Text>
-          </View>
-          <View style={styles.metaItem}>
-            <Icon name="clock-o" type="font-awesome" size={14} color="#64748B" />
-            <Text style={styles.metaText}>Last seen: {formatDateTime(item.lastSeenISO)}</Text>
+          <View style={styles.empProgressRow}>
+            <Text style={styles.empProgressText}>{pct}% in range</Text>
+            <View style={styles.progressHint}>
+              <Icon name="clock-o" type="font-awesome" size={12} color="#94A3B8" />
+              <Text style={styles.hintText}>Last seen {formatDateTime(item.lastSeenISO)}</Text>
+            </View>
           </View>
         </View>
       </View>
@@ -166,82 +325,135 @@ const DashboardScreen: React.FC<Props> = ({ navigation, route }) => {
   };
 
   return (
-    <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollPad}>
-
-        {/* Top Bar */}
-      <View style={styles.topBarCentered}>
-  <TouchableOpacity
-    onPress={() => navigation.navigate('AddEmployee')}
-    style={styles.largeAddButton}
-    activeOpacity={0.92}
-    accessibilityRole="button"
-    accessibilityLabel="Add employee"
-  >
-    <Icon name="user-plus" type="font-awesome" size={18} color="#0B1220" />
-    <Text style={styles.largeAddText}>Add Employee</Text>
-  </TouchableOpacity>
-</View>
-
-        {/* Org Attendance Summary */}
-        <View style={styles.section}>
+    <SafeAreaView style={styles.container}>
+      <ScrollView
+        contentContainerStyle={styles.scrollPad}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#7DD3FC" />
+        }
+      >
+        {/* Overview + range filter */}
+        <View style={[styles.section, { paddingBottom: 10 }]}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Attendance Overview</Text>
-            <Text style={styles.sectionSubtitle}>
-              {monthStart.toLocaleString('default', { month: 'long' })} {today.getFullYear()}
-            </Text>
+            <View>
+              <Text style={styles.sectionTitle}>Attendance Overview</Text>
+              <Text style={styles.sectionSubtitle}>
+                {rangeKey === 'THIS_MONTH'
+                  ? `${orgStats.monthStartLabel} ${orgStats.yearLabel}`
+                  : `${rangeStart.toLocaleDateString()} – ${rangeEnd.toLocaleDateString()}`}
+              </Text>
+            </View>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+              {RANGE_OPTIONS.map(opt => {
+                const selected = opt.key === rangeKey;
+                return (
+                  <TouchableOpacity
+                    key={opt.key}
+                    onPress={() => setRangeKey(opt.key)}
+                    style={[styles.chip, selected && styles.chipSelected]}
+                    activeOpacity={0.9}
+                  >
+                    <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{opt.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
           </View>
 
           <View style={styles.statsRow}>
             <View style={styles.statCard}>
-              <Text style={styles.statValue}>{avgPresencePct}%</Text>
-              <Text style={styles.statLabel}>Avg Presence</Text>
+              <View style={styles.statTopRow}>
+                <Icon name="line-chart" type="font-awesome" size={14} color="#7DD3FC" />
+                <Text style={[styles.statDelta, { color: presenceColor(orgStats.avgPresencePct) }]}>
+                  {orgStats.avgPresencePct >= 75 ? 'On Track' : 'Needs Attention'}
+                </Text>
+              </View>
+              <Text style={styles.statValue}>{orgStats.avgPresencePct}%</Text>
+              <Text style={styles.statLabel}>Average Presence</Text>
             </View>
+
             <View style={styles.statCard}>
-              <Text style={styles.statValue}>{totalPresentDays}</Text>
+              <View style={styles.statTopRow}>
+                <Icon name="check-circle-o" type="font-awesome" size={14} color="#86EFAC" />
+                <Text style={styles.statDeltaMuted}>In Range</Text>
+              </View>
+              <Text style={styles.statValue}>{orgStats.totalPresentDays}</Text>
               <Text style={styles.statLabel}>Total Present Days</Text>
             </View>
+
             <View style={styles.statCard}>
-              <Text style={styles.statValue}>{totalEmployees}</Text>
+              <View style={styles.statTopRow}>
+                <Icon name="users" type="font-awesome" size={14} color="#FCA5A5" />
+                <Text style={styles.statDeltaMuted}>Active</Text>
+              </View>
+              <Text style={styles.statValue}>{orgStats.totalEmployees}</Text>
               <Text style={styles.statLabel}>Employees</Text>
             </View>
           </View>
 
           <View style={styles.metaRow}>
             <View style={styles.metaItem}>
-              <Icon name="calendar" type="font-awesome" size={16} color="#64748B" />
+              <Icon name="calendar" type="font-awesome" size={16} color="#94A3B8" />
               <Text style={styles.metaText}>
-                Range: {monthStart.toLocaleDateString()} – {today.toLocaleDateString()}
+                Range: {rangeStart.toLocaleDateString()} – {rangeEnd.toLocaleDateString()}
               </Text>
             </View>
             <View style={styles.metaItem}>
-              <Icon name="clock-o" type="font-awesome" size={16} color="#64748B" />
-              <Text style={styles.metaText}>Last activity: {formatDateTime(mostRecentSeenISO)}</Text>
+              <Icon name="clock-o" type="font-awesome" size={16} color="#94A3B8" />
+              <Text style={styles.metaText}>Last activity: {formatDateTime(orgStats.mostRecentSeenISO)}</Text>
             </View>
           </View>
         </View>
 
+        {/* Add Employee */}
+        <View style={styles.actionRow}>
+          <TouchableOpacity
+            onPress={() => navigation.navigate('AddEmployee')}
+            style={styles.primaryButton}
+            activeOpacity={0.92}
+            accessibilityRole="button"
+            accessibilityLabel="Add employee"
+          >
+            <Icon name="user-plus" type="font-awesome" size={16} color="#0B1220" />
+            <Text style={styles.primaryButtonText}>Add Employee</Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Employees List */}
-        <Text style={styles.subTitle}>Employees</Text>
+        <View style={styles.sectionHeaderTight}>
+          <Text style={styles.subTitle}>Employees</Text>
+          <TouchableOpacity
+            onPress={() => navigation.navigate('Home')}
+            style={styles.smallLink}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.smallLinkText}>Back to Home</Text>
+            <Icon name="angle-right" type="font-awesome" size={14} color="#A5B4FC" />
+          </TouchableOpacity>
+        </View>
+
         <FlatList
-          data={employees}
+          data={uiEmployees}
           keyExtractor={(e) => e.id}
-          renderItem={renderEmployee}
+          renderItem={renderEmp}
           contentContainerStyle={styles.list}
           scrollEnabled={false}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
-              <Icon name="users" type="font-awesome" size={18} color="#94A3B8" />
-              <Text style={styles.emptyText}>No employees found.</Text>
+              {loading ? (
+                <Text style={styles.emptyText}>Loading…</Text>
+              ) : (
+                <>
+                  <Icon name="users" type="font-awesome" size={18} color="#94A3B8" />
+                  <Text style={styles.emptyText}>No employees yet.</Text>
+                </>
+              )}
             </View>
           }
         />
-
-        <TouchableOpacity onPress={() => navigation.navigate('Home')} style={styles.backButton} activeOpacity={0.9}>
-          <Text style={styles.backText}>Back to Home</Text>
-        </TouchableOpacity>
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 };
 

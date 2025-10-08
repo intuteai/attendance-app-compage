@@ -14,7 +14,7 @@ import {
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../../navigation/types';
 import { Icon } from 'react-native-elements';
-import { styles } from './styles';
+import { styles } from './AddEmployeeScreen.styles';
 
 // Camera deps
 import { Camera, useCameraDevice, PhotoFile } from 'react-native-vision-camera';
