@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -7,196 +7,113 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
-  Modal,
-  Platform,
-  Image,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../../navigation/types';
 import { Icon } from 'react-native-elements';
 import { styles } from './AddEmployeeScreen.styles';
-
-// Camera deps
-import { Camera, useCameraDevice, PhotoFile } from 'react-native-vision-camera';
-import { check, request, PERMISSIONS, RESULTS, openSettings } from 'react-native-permissions';
-import { useIsFocused } from '@react-navigation/native';
+import { useRoute } from '@react-navigation/native';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'AddEmployee'>;
 
-// ======= CONFIG: add-employee endpoint (leave blank for now) =======
-const VPS_ADD_EMPLOYEE_URL = ''; // e.g., 'https://YOUR_VPS/employee'
-// ================================================================
+// ======= CONFIG: endpoints (leave blank for now) =======
+// ERP: basic details (we’ll call later; can stay blank for now)
+const ERP_CREATE_EMPLOYEE_URL = '';
+// VPS: frame upload target (used after video in next step)
+const VPS_FRAMES_UPLOAD_URL = '';
+// =======================================================
+
+// Recording script we will show during video (used in next step)
+export const FACE_PROMPTS: ReadonlyArray<string> = [
+  'Look straight',
+  'Turn left',
+  'Turn right',
+  'Look up',
+  'Look down',
+  'Smile',
+];
+
+// Timings: 10s per prompt, capture frame every 0.5s (used in next step)
+export const PROMPT_DURATION_MS = 10_000;
+export const FRAME_INTERVAL_MS = 500;
 
 const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
   // --- form state ---
   const [fullName, setFullName] = useState('');
   const [empId, setEmpId] = useState('');
-  const [role, setRole] = useState<'Driver' | 'Supervisor' | 'Other'>('Driver');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
-  const [notes, setNotes] = useState('');
- const isFocused = useIsFocused();
-  // photos captured in this screen
-  const [imagePaths, setImagePaths] = useState<string[]>([]);
 
-  // --- submit/loading state (NEW) ---
+  // --- submit/loading state ---
   const [submitting, setSubmitting] = useState(false);
 
-  // --- camera state (modal) ---
-  const [showCamera, setShowCamera] = useState(false);
-  const [hasPermission, setHasPermission] = useState(false);
-  const [permissionAsked, setPermissionAsked] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
-  const [capturing, setCapturing] = useState(false);
-
-  const camera = useRef<Camera>(null);
-  const device = useCameraDevice('front') ?? useCameraDevice('back');
-
-  // --- permissions ---
-  const checkPermissions = useCallback(async () => {
-    try {
-      let cameraStatus;
-      if (Platform.OS === 'android') {
-        cameraStatus = await check(PERMISSIONS.ANDROID.CAMERA);
-      } else {
-        cameraStatus = await check(PERMISSIONS.IOS.CAMERA);
-      }
-
-      if (cameraStatus === RESULTS.GRANTED) {
-        const vision = await Camera.getCameraPermissionStatus();
-        setHasPermission(vision === 'granted');
-        if (vision !== 'granted') {
-          const req = await Camera.requestCameraPermission();
-          setHasPermission(req === 'granted');
-        }
-      } else if (cameraStatus === RESULTS.DENIED) {
-        let req;
-        if (Platform.OS === 'android') {
-          req = await request(PERMISSIONS.ANDROID.CAMERA);
-        } else {
-          req = await request(PERMISSIONS.IOS.CAMERA);
-        }
-        setHasPermission(req === RESULTS.GRANTED);
-      } else if (cameraStatus === RESULTS.BLOCKED) {
-        setHasPermission(false);
-        Alert.alert(
-          'Camera Permission',
-          'Camera access is blocked. Enable it from Settings.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => openSettings() },
-          ]
-        );
-      } else {
-        setHasPermission(false);
-      }
-    } catch (e) {
-      console.error('Permission check error:', e);
-      setHasPermission(false);
-    } finally {
-      setPermissionAsked(true);
-    }
-  }, []);
+  // --- video step state ---
+  const [videoRecorded, setVideoRecorded] = useState(false);
+  const routeAny = useRoute<any>();
 
   useEffect(() => {
-    checkPermissions();
-  }, [checkPermissions]);
-
-  const handleOpenCamera = async () => {
-    if (!permissionAsked) await checkPermissions();
-    if (!hasPermission) {
-      Alert.alert('Permission Required', 'Please allow camera access to add photos.');
-      return;
+  const unsub = navigation.addListener('focus', () => {
+    const done = routeAny?.params?.videoDone;
+    if (done) {
+      setVideoRecorded(true);
+      // clear the flag so future visits don’t auto-mark it
+      navigation.setParams?.({ videoDone: undefined } as any);
     }
-    setShowCamera(true);
-  };
+  });
+  return unsub;
+}, [navigation, routeAny]);
 
-  const handleTakePhoto = async () => {
-    if (!device || !cameraReady) return;
-    try {
-      setCapturing(true);
-      const photo: PhotoFile | undefined = await camera.current?.takePhoto({});
-      if (!photo?.path) {
-        Alert.alert('Error', 'Failed to capture image.');
-        return;
-      }
-      const localPath = photo.path.startsWith('file://') ? photo.path : `file://${photo.path}`;
-      setImagePaths(prev => [localPath, ...prev]);
-    } catch (err: any) {
-      console.error('Capture error:', err);
-      Alert.alert('Error', err?.message ?? 'Failed to capture.');
-    } finally {
-      setCapturing(false);
-    }
-  };
 
-  // ---------- SUBMIT LOGIC (NEW) ----------
+
   const buildFormData = () => {
     const form = new FormData();
     form.append('fullName', fullName.trim());
     form.append('employeeId', empId.trim());
-    form.append('role', role);
     if (phone.trim()) form.append('phone', phone.trim());
     if (email.trim()) form.append('email', email.trim());
-    if (notes.trim()) form.append('notes', notes.trim());
-
-    imagePaths.forEach((uri, idx) => {
-      const filename = `emp-${empId || 'noid'}-${idx + 1}.jpg`;
-      // RN needs file:// on Android if absent
-      const withScheme = uri.startsWith('file://') ? uri : `file://${uri}`;
-      form.append('photos', { uri: withScheme, name: filename, type: 'image/jpeg' } as any);
-    });
-
     return form;
   };
 
   const resetForm = () => {
     setFullName('');
     setEmpId('');
-    setRole('Driver');
     setPhone('');
     setEmail('');
-    setNotes('');
-    setImagePaths([]);
+    setVideoRecorded(false);
   };
 
   const handleSubmit = async () => {
-    if (!fullName.trim() || !empId.trim() || !role) {
-      Alert.alert('Missing Info', 'Please fill Name, Employee ID, and Role.');
+    if (!fullName.trim() || !empId.trim()) {
+      Alert.alert('Missing Info', 'Please fill Name and Employee ID.');
       return;
     }
-
-    // If you have validation rules, extend here (email/phone format, etc.)
     if (email && !/^\S+@\S+\.\S+$/.test(email)) {
       Alert.alert('Invalid Email', 'Please enter a valid email address.');
+      return;
+    }
+    if (!videoRecorded) {
+      Alert.alert('Face Video Required', 'Please complete the face video recording step.');
       return;
     }
 
     setSubmitting(true);
     try {
-      // If URL is empty, show preview instead of network call
-      if (!VPS_ADD_EMPLOYEE_URL) {
+      // If endpoints are empty, just preview and stop.
+      if (!ERP_CREATE_EMPLOYEE_URL || !VPS_FRAMES_UPLOAD_URL) {
         Alert.alert(
           'Preview (no server URL set)',
-          `Will submit:\n\nName: ${fullName}\nID: ${empId}\nRole: ${role}\nPhone: ${phone}\nEmail: ${email}\nNotes: ${notes}\nPhotos: ${imagePaths.length}`
+          `Will submit:\n\nName: ${fullName}\nID: ${empId}\nPhone: ${phone}\nEmail: ${email}\nVideo Recorded: ${videoRecorded ? 'Yes' : 'No'}`
         );
-        setSubmitting(false);
         return;
       }
 
       const form = buildFormData();
 
-      const res = await fetch(VPS_ADD_EMPLOYEE_URL, {
-        method: 'POST',
-        body: form, // RN will set correct multipart boundary
-      });
+      // 1) send basic details to ERP (placeholder; we won’t block on response body)
+      await fetch(ERP_CREATE_EMPLOYEE_URL, { method: 'POST', body: form });
 
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`Server responded ${res.status}${text ? `: ${text}` : ''}`);
-      }
+      // 2) frames upload to VPS will be done by RecordFaceVideo screen in next step
 
-      // Success UX
       Alert.alert('Employee Added', `${fullName} has been saved successfully.`, [
         { text: 'OK', onPress: () => navigation.goBack() },
       ]);
@@ -207,23 +124,6 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
     } finally {
       setSubmitting(false);
     }
-  };
-  // ---------------------------------------
-
-  // role selector UI
-  const RolePill = ({ value }: { value: 'Driver' | 'Supervisor' | 'Other' }) => {
-    const active = role === value;
-    return (
-      <TouchableOpacity
-        onPress={() => setRole(value)}
-        style={[styles.pill, active ? styles.pillActive : styles.pillIdle]}
-        activeOpacity={0.9}
-      >
-        <Text style={[styles.pillText, active ? styles.pillTextActive : styles.pillTextIdle]}>
-          {value}
-        </Text>
-      </TouchableOpacity>
-    );
   };
 
   return (
@@ -276,17 +176,6 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
             </View>
 
             <View style={[styles.inputGroup, styles.inputHalf]}>
-              <Text style={styles.label}>Role</Text>
-              <View style={styles.pillRow}>
-                <RolePill value="Driver" />
-                <RolePill value="Supervisor" />
-                <RolePill value="Other" />
-              </View>
-            </View>
-          </View>
-
-          <View style={styles.inputRow}>
-            <View style={[styles.inputGroup, styles.inputHalf]}>
               <Text style={styles.label}>Phone</Text>
               <TextInput
                 placeholder="+91 98765 43210"
@@ -298,57 +187,48 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
                 editable={!submitting}
               />
             </View>
-
-            <View style={[styles.inputGroup, styles.inputHalf]}>
-              <Text style={styles.label}>Email</Text>
-              <TextInput
-                placeholder="name@company.com"
-                placeholderTextColor="#6B7280"
-                value={email}
-                onChangeText={setEmail}
-                style={styles.input}
-                keyboardType="email-address"
-                autoCapitalize="none"
-                editable={!submitting}
-              />
-            </View>
           </View>
 
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Notes</Text>
+            <Text style={styles.label}>Email</Text>
             <TextInput
-              placeholder="Optional notes..."
+              placeholder="name@company.com"
               placeholderTextColor="#6B7280"
-              value={notes}
-              onChangeText={setNotes}
-              style={[styles.input, styles.textarea]}
-              multiline
-              numberOfLines={4}
+              value={email}
+              onChangeText={setEmail}
+              style={styles.input}
+              keyboardType="email-address"
+              autoCapitalize="none"
               editable={!submitting}
             />
           </View>
 
-          {/* Photos */}
-          <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Photos</Text>
+          {/* Face video */}
+          <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Face Video</Text>
           <View style={styles.photoRow}>
             <TouchableOpacity
               style={[styles.addPhotoBtn, submitting && { opacity: 0.6 }]}
-              onPress={handleOpenCamera}
+              onPress={() => {
+                if (!fullName.trim() || !empId.trim()) {
+                  Alert.alert('Missing Info', 'Please fill Name and Employee ID before recording the face video.');
+                  return;
+                }
+                setVideoRecorded(false); // reset if re-recording
+                navigation.navigate('RecordFaceVideo', { empId, fullName });
+              }}
               activeOpacity={0.9}
               disabled={submitting}
             >
-              <Icon name="camera" type="font-awesome" size={18} color="#0EA5E9" />
-              <Text style={styles.addPhotoText}>Add Photos</Text>
-            </TouchableOpacity>
-
-            {imagePaths.slice(0, 4).map((p, idx) => (
-              <Image
-                key={`${p}-${idx}`}
-                source={{ uri: p }}
-                style={styles.thumb}
-                resizeMode="cover"
+              <Icon
+                name={videoRecorded ? 'check' : 'video-camera'}
+                type="font-awesome"
+                size={18}
+                color={videoRecorded ? '#22C55E' : '#0EA5E9'}
               />
-            ))}
+              <Text style={styles.addPhotoText}>
+                {videoRecorded ? 'Recorded' : 'Record Video'}
+              </Text>
+            </TouchableOpacity>
           </View>
 
           {/* Submit */}
@@ -369,59 +249,6 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
           </TouchableOpacity>
         </View>
       </ScrollView>
-
-      {/* Camera Modal */}
-      <Modal visible={showCamera} animationType="fade" onRequestClose={() => { setShowCamera(false); setCameraReady(false); }}>
-        <View style={styles.cameraWrap}>
-          <View style={styles.cameraHeader}>
-            <TouchableOpacity onPress={() => { setShowCamera(false); setCameraReady(false); }} style={styles.closeCamBtn}>
-              <Icon name="close" type="font-awesome" size={16} color="#E5E7EB" />
-              <Text style={styles.closeCamText}>Close</Text>
-            </TouchableOpacity>
-            <Text style={styles.cameraTitle}>Capture Photo</Text>
-            <View style={{ width: 72 }} />
-          </View>
-
-          {!permissionAsked || !hasPermission ? (
-            <View style={styles.cameraCenter}>
-              <ActivityIndicator size="large" color="#FFF" />
-              <Text style={styles.cameraHint}>Preparing camera…</Text>
-            </View>
-          ) : !device ? (
-            <View style={styles.cameraCenter}>
-              <ActivityIndicator size="large" color="#FFF" />
-              <Text style={styles.cameraHint}>Loading device…</Text>
-            </View>
-          ) : (
-
-            
-            <>
-              <Camera
-                ref={camera}
-                style={styles.camera}
-                device={device}
-                isActive={isFocused && showCamera}
-                photo={true}
-                onInitialized={() => setCameraReady(true)}
-                onError={(error) => {
-                  console.error('Camera Error:', error);
-                  Alert.alert('Camera Error', error.message);
-                }}
-              />
-              <View style={styles.camControls}>
-                <TouchableOpacity
-                  style={styles.shutter}
-                  onPress={handleTakePhoto}
-                  disabled={capturing}
-                  activeOpacity={0.9}
-                >
-                  <Icon name="camera" type="font-awesome" size={22} color="#0B1220" />
-                </TouchableOpacity>
-              </View>
-            </>
-          )}
-        </View>
-      </Modal>
     </View>
   );
 };

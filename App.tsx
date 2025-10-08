@@ -12,6 +12,7 @@ import HomeScreen from './src/screens/Homescreen/homescreen';
 // import LoginScreen from './src/screens/Loginscreen/loginscreen';
 import DashboardScreen from './src/screens/Dashboard/dashboard';
 import AddEmployeeScreen from './src/screens/AddEmployee/AddEmployeeScreen';
+import RecordFaceVideoScreen from './src/screens/attendance/RecordFaceVideoScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -53,6 +54,7 @@ const App = () => {
           {/* <Stack.Screen name="Login" component={LoginScreen} /> */}
           <Stack.Screen name="Dashboard" component={DashboardScreen} />
           <Stack.Screen name="AddEmployee" component={AddEmployeeScreen} />
+          <Stack.Screen name="RecordFaceVideo" component={RecordFaceVideoScreen} />
         </Stack.Navigator>
       </NavigationContainer>
     </GestureHandlerRootView>
