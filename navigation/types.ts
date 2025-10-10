@@ -5,8 +5,13 @@ export type RootStackParamList = {
   Home: undefined;
   Login: undefined;
   Dashboard: { imagePaths?: string[] } | undefined; // single source of truth
-   AddEmployee: undefined;
-   RecordFaceVideo: { empId: string; fullName: string };
+   AddEmployee: { videoDone?: boolean };
+  RecordFaceVideo: {
+    empId: string;
+    fullName: string;
+    uploadUrl: string;
+    // remove addEmployeeKey if you adopt the pop-back approach
+  };
 };
 
 // (optional but nice for useNavigation without generics)

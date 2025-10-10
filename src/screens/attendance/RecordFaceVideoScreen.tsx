@@ -17,6 +17,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { openSettings } from 'react-native-permissions';
 import RNFS from 'react-native-fs';
 import { Icon } from 'react-native-elements';
+import { CommonActions } from '@react-navigation/native';
 
 // =====================================================
 // CONFIG
@@ -261,8 +262,13 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
             {
               text: 'OK',
               onPress: () => {
-                navigation.navigate('AddEmployee' as any, { videoDone: true } as any);
-              },
+  // Pop back to the existing AddEmployee route and merge the param
+  navigation.navigate(
+    'AddEmployee',
+    { videoDone: true },       // 👈 param your AddEmployee can now read
+    { merge: true, pop: true } // 👈 don't push; pop to existing + merge
+  );
+},
             },
           ]);
         },

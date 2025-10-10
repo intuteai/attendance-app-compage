@@ -16,14 +16,13 @@ import { useRoute } from '@react-navigation/native';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'AddEmployee'>;
 
-// ======= CONFIG: endpoints (leave blank for now) =======
-// ERP: basic details (we’ll call later; can stay blank for now)
-const ERP_CREATE_EMPLOYEE_URL = '';
-// VPS: frame upload target (used after video in next step)
-const VPS_FRAMES_UPLOAD_URL = '';
-// =======================================================
+// ======= CONFIG: endpoints =======
+const BASE_URL = 'http://192.168.1.5:6900'; // replace with your local server IP
+const ERP_CREATE_EMPLOYEE_URL = `${BASE_URL}/register`;
+const VPS_FRAMES_UPLOAD_URL = `${BASE_URL}/upload_frames`;
+// =================================
 
-// Recording script we will show during video (used in next step)
+// Recording script for RecordFaceVideo screen
 export const FACE_PROMPTS: ReadonlyArray<string> = [
   'Look straight',
   'Turn left',
@@ -32,43 +31,35 @@ export const FACE_PROMPTS: ReadonlyArray<string> = [
   'Look down',
   'Smile',
 ];
-
-// Timings: 10s per prompt, capture frame every 0.5s (used in next step)
 export const PROMPT_DURATION_MS = 10_000;
 export const FRAME_INTERVAL_MS = 500;
 
 const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
-  // --- form state ---
   const [fullName, setFullName] = useState('');
   const [empId, setEmpId] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
-
-  // --- submit/loading state ---
   const [submitting, setSubmitting] = useState(false);
-
-  // --- video step state ---
   const [videoRecorded, setVideoRecorded] = useState(false);
+
   const routeAny = useRoute<any>();
 
+  // if returning from RecordFaceVideo
   useEffect(() => {
-  const unsub = navigation.addListener('focus', () => {
-    const done = routeAny?.params?.videoDone;
-    if (done) {
-      setVideoRecorded(true);
-      // clear the flag so future visits don’t auto-mark it
-      navigation.setParams?.({ videoDone: undefined } as any);
-    }
-  });
-  return unsub;
-}, [navigation, routeAny]);
-
-
+    const unsub = navigation.addListener('focus', () => {
+      const done = routeAny?.params?.videoDone;
+      if (done) {
+        setVideoRecorded(true);
+        navigation.setParams?.({ videoDone: undefined } as any);
+      }
+    });
+    return unsub;
+  }, [navigation, routeAny]);
 
   const buildFormData = () => {
     const form = new FormData();
-    form.append('fullName', fullName.trim());
-    form.append('employeeId', empId.trim());
+    form.append('name', fullName.trim());
+    form.append('emp_id', empId.trim());
     if (phone.trim()) form.append('phone', phone.trim());
     if (email.trim()) form.append('email', email.trim());
     return form;
@@ -98,23 +89,19 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
 
     setSubmitting(true);
     try {
-      // If endpoints are empty, just preview and stop.
-      if (!ERP_CREATE_EMPLOYEE_URL || !VPS_FRAMES_UPLOAD_URL) {
-        Alert.alert(
-          'Preview (no server URL set)',
-          `Will submit:\n\nName: ${fullName}\nID: ${empId}\nPhone: ${phone}\nEmail: ${email}\nVideo Recorded: ${videoRecorded ? 'Yes' : 'No'}`
-        );
-        return;
-      }
-
       const form = buildFormData();
 
-      // 1) send basic details to ERP (placeholder; we won’t block on response body)
-      await fetch(ERP_CREATE_EMPLOYEE_URL, { method: 'POST', body: form });
+      // 1️⃣ Send to /register
+      const registerResp = await fetch(ERP_CREATE_EMPLOYEE_URL, {
+        method: 'POST',
+        body: form,
+      });
 
-      // 2) frames upload to VPS will be done by RecordFaceVideo screen in next step
+      if (!registerResp.ok) {
+        throw new Error(`Registration failed: ${registerResp.status}`);
+      }
 
-      Alert.alert('Employee Added', `${fullName} has been saved successfully.`, [
+      Alert.alert('Success', `${fullName} registered successfully.`, [
         { text: 'OK', onPress: () => navigation.goBack() },
       ]);
       resetForm();
@@ -129,22 +116,18 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.pad}>
-        {/* Header row */}
         <View style={styles.topBar}>
           <TouchableOpacity
             onPress={() => navigation.goBack()}
             style={styles.backBtn}
             activeOpacity={0.9}
-            accessibilityRole="button"
-            accessibilityLabel="Back"
           >
             <Icon name="chevron-left" type="font-awesome" size={16} color="#E5E7EB" />
           </TouchableOpacity>
           <Text style={styles.title}>Add Employee</Text>
-          <View style={{ width: 36 }} />{/* spacer */}
+          <View style={{ width: 36 }} />
         </View>
 
-        {/* Card */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Basic Details</Text>
 
@@ -203,18 +186,21 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
             />
           </View>
 
-          {/* Face video */}
           <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Face Video</Text>
           <View style={styles.photoRow}>
             <TouchableOpacity
               style={[styles.addPhotoBtn, submitting && { opacity: 0.6 }]}
               onPress={() => {
                 if (!fullName.trim() || !empId.trim()) {
-                  Alert.alert('Missing Info', 'Please fill Name and Employee ID before recording the face video.');
+                  Alert.alert('Missing Info', 'Please fill Name and Employee ID before recording.');
                   return;
                 }
-                setVideoRecorded(false); // reset if re-recording
-                navigation.navigate('RecordFaceVideo', { empId, fullName });
+                setVideoRecorded(false);
+                navigation.navigate('RecordFaceVideo', {
+   empId,
+   fullName,
+   uploadUrl: VPS_FRAMES_UPLOAD_URL,
+ });
               }}
               activeOpacity={0.9}
               disabled={submitting}
@@ -231,7 +217,6 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
             </TouchableOpacity>
           </View>
 
-          {/* Submit */}
           <TouchableOpacity
             style={[styles.submitBtn, submitting && styles.submitBtnDisabled]}
             onPress={handleSubmit}
