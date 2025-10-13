@@ -17,12 +17,13 @@ import { useIsFocused } from '@react-navigation/native';
 import { openSettings } from 'react-native-permissions';
 import RNFS from 'react-native-fs';
 import { Icon } from 'react-native-elements';
-import { CommonActions } from '@react-navigation/native';
 
-// =====================================================
-// CONFIG
-// =====================================================
-const VPS_FRAMES_UPLOAD_URL = ''; // e.g. 'https://your-vps/upload-frames' (REQUIRED to really upload)
+/**
+ * Fallback URL; will be overridden by route.params.uploadUrl if provided.
+ * Keep this identical to AddEmployeeScreen's BASE_URL when using the VPS.
+ */
+const DEFAULT_UPLOAD_URL = 'http://148.66.155.196:6900/register';
+
 const FRAME_INTERVAL_MS = 500;     // capture frame every 0.5s
 const PROMPT_DURATION_MS = 10_000; // 10s per prompt
 
@@ -34,12 +35,12 @@ const FACE_PROMPTS: ReadonlyArray<string> = [
   'Look down',
   'Smile',
 ];
-// =====================================================
 
 type Props = NativeStackScreenProps<RootStackParamList, 'RecordFaceVideo'>;
 
 const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
-  const { empId, fullName } = route.params;
+  const { empId, fullName, uploadUrl } = (route.params as any) || {};
+  const VPS_FRAMES_UPLOAD_URL: string = uploadUrl || DEFAULT_UPLOAD_URL;
 
   const isFocused = useIsFocused();
   const front = useCameraDevice('front');
@@ -68,10 +69,10 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
 
   // timers (for cleanup)
   const timersRef = useRef<{
-    tick?: NodeJS.Timeout;
-    prompt?: NodeJS.Timeout;
-    whole?: NodeJS.Timeout;
-    frame?: NodeJS.Timeout;
+    tick?: ReturnType<typeof setInterval>;
+    prompt?: ReturnType<typeof setInterval>;
+    whole?: ReturnType<typeof setTimeout>;
+    frame?: ReturnType<typeof setInterval>;
   }>({});
 
   const totalPrompts = FACE_PROMPTS.length;
@@ -89,16 +90,16 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
 
   // ================= Permissions =================
   const checkPermissions = useCallback(async () => {
-  try {
-    const cam = await Camera.requestCameraPermission();         // returns 'granted' | 'denied' | ...
-    const mic = await Camera.requestMicrophonePermission();     // same type
-    setHasPermission(cam === 'granted' && mic === 'granted');
-  } catch (e) {
-    setHasPermission(false);
-  } finally {
-    setPermissionAsked(true);
-  }
-}, []);
+    try {
+      const cam = await Camera.requestCameraPermission();
+      const mic = await Camera.requestMicrophonePermission();
+      setHasPermission(cam === 'granted' && mic === 'granted');
+    } catch {
+      setHasPermission(false);
+    } finally {
+      setPermissionAsked(true);
+    }
+  }, []);
 
   useEffect(() => {
     if (!permissionAsked) checkPermissions();
@@ -130,6 +131,19 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     timersRef.current = {};
   };
 
+  // define stopRecording FIRST (so it's available to startPromptTimers)
+  const stopRecording = useCallback(async () => {
+    try {
+      clearTimers();
+      await camera.current?.stopRecording();
+      setRecording(false);
+      setBusy(true); // brief cover until onRecordingFinished fires
+    } catch {
+      setBusy(false);
+    }
+  }, []);
+
+  // then define startPromptTimers
   const startPromptTimers = useCallback(() => {
     setPromptIndex(0);
     setPromptCountdown(PROMPT_DURATION_MS / 1000);
@@ -152,37 +166,52 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     timersRef.current.whole = setTimeout(() => {
       stopRecording();
     }, totalDurationMs);
-  }, [totalDurationMs]);
+  }, [totalPrompts, totalDurationMs, stopRecording]);
 
-  // upload a single frame to VPS
+  // upload a single frame to VPS — matches FastAPI signature: name + files
   const uploadFrameToVPS = useCallback(
     async (filePath: string, prompt: string, ts: number) => {
-      if (!VPS_FRAMES_UPLOAD_URL) {
-        // No server configured: just sim success
-        return true;
-      }
+      if (!VPS_FRAMES_UPLOAD_URL) return true;
+
+      const controller = new AbortController();
+      const to = setTimeout(() => controller.abort(), 8000);
+
       const form = new FormData();
-      form.append('employeeId', empId);
-      form.append('fullName', fullName);
-      form.append('prompt', prompt);
+
+      // REQUIRED by backend
+      form.append('name', String(fullName || ''));
+
+      // Optional metadata (if backend declares them as Form(None))
+      if (empId) form.append('employeeId', String(empId));
+      form.append('prompt', String(prompt));
       form.append('timestampMs', String(ts));
-      form.append('frame', {
+
+      // Backend expects list[UploadFile] under field 'files'
+      form.append('files', {
         uri: filePath.startsWith('file://') ? filePath : `file://${filePath}`,
         name: `frame_${ts}.jpg`,
         type: 'image/jpeg',
       } as any);
 
-      const res = await fetch(VPS_FRAMES_UPLOAD_URL, {
-        method: 'POST',
-        body: form,
-      });
-      if (!res.ok) {
-        const t = await res.text().catch(() => '');
-        throw new Error(`VPS upload failed: ${res.status}${t ? ` - ${t}` : ''}`);
+      try {
+        const res = await fetch(VPS_FRAMES_UPLOAD_URL, {
+          method: 'POST',
+          body: form,
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const t = await res.text().catch(() => '');
+          throw new Error(`HTTP ${res.status}${t ? ` - ${t}` : ''}`);
+        }
+        return true;
+      } catch (err: any) {
+        console.warn('Upload error:', err?.message ?? err);
+        throw err;
+      } finally {
+        clearTimeout(to);
       }
-      return true;
     },
-    [empId, fullName]
+    [VPS_FRAMES_UPLOAD_URL, fullName, empId]
   );
 
   // capture & send current frame (throttled by FRAME_INTERVAL_MS)
@@ -213,7 +242,6 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
       framesSentRef.current += 1;
       setFramesSent(framesSentRef.current);
     } catch (e) {
-      // Log and keep going; don't break recording for a single frame failure
       console.warn('Frame capture/upload error:', e);
     } finally {
       setIsSendingFrame(false);
@@ -221,9 +249,7 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
   }, [recording, isSendingFrame, outputDir, promptIndex, uploadFrameToVPS]);
 
   const startFrameLoop = useCallback(() => {
-    // fire immediately so we don't wait for first interval
-    captureAndSendFrame();
-    // then every FRAME_INTERVAL_MS
+    captureAndSendFrame(); // fire immediately
     timersRef.current.frame = setInterval(() => {
       captureAndSendFrame();
     }, FRAME_INTERVAL_MS);
@@ -250,25 +276,21 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
         fileType: 'mp4',
         videoCodec: 'h264',
         onRecordingFinished: async (video: VideoFile) => {
-          // Frames have already been sent live. Clean up video and temp dir, then return.
           try {
             if (video?.path) {
               await RNFS.unlink(video.path).catch(() => {});
             }
-            // optional: cleanup temp frames directory
-            try { await RNFS.unlink(outputDir); } catch {}
+            try {
+              await RNFS.unlink(outputDir);
+            } catch {}
           } catch {}
+
           Alert.alert('Done', 'Face video & live frames captured successfully.', [
             {
               text: 'OK',
               onPress: () => {
-  // Pop back to the existing AddEmployee route and merge the param
-  navigation.navigate(
-    'AddEmployee',
-    { videoDone: true },       // 👈 param your AddEmployee can now read
-    { merge: true, pop: true } // 👈 don't push; pop to existing + merge
-  );
-},
+                navigation.navigate('AddEmployee', { videoDone: true } as any);
+              },
             },
           ]);
         },
@@ -280,7 +302,6 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
         },
       });
 
-      // start prompts + frame loop
       startPromptTimers();
       startFrameLoop();
     } catch (e: any) {
@@ -291,20 +312,8 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   }, [cameraReady, device, hasPermission, empId, fullName, navigation, startPromptTimers, startFrameLoop, outputDir]);
 
-  const stopRecording = useCallback(async () => {
-    try {
-      clearTimers();
-      await camera.current?.stopRecording();
-      setRecording(false);
-      setBusy(true); // brief cover until onRecordingFinished fires
-      // onRecordingFinished will navigate back with success flag
-    } catch {
-      setBusy(false);
-    }
-  }, []);
-
-  // ================= UI =================
-  const disabledStart = !isFocused || !device || !hasPermission || !cameraReady || recording || busy;
+  const disabledStart =
+    !isFocused || !device || !hasPermission || !cameraReady || recording || busy;
 
   return (
     <View style={s.wrap}>
@@ -350,7 +359,7 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
               style={s.camera}
               device={device}
               isActive={isFocused}
-              photo={true}   // IMPORTANT: allow takePhoto while recording
+              photo={true}   // allow takePhoto while recording
               video={true}
               audio={true}
               onInitialized={() => setCameraReady(true)}
@@ -372,7 +381,8 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
               ) : (
                 <Text style={s.readyTxt}>
                   We’ll guide you through:
-                  {'\n'}{FACE_PROMPTS.join(' • ')}
+                  {'\n'}
+                  {FACE_PROMPTS.join(' • ')}
                 </Text>
               )}
             </View>
@@ -438,7 +448,10 @@ const s = StyleSheet.create({
 
   overlay: {
     position: 'absolute',
-    left: 0, right: 0, top: 0, bottom: 0,
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 24,
@@ -528,3 +541,4 @@ const s = StyleSheet.create({
 });
 
 export default RecordFaceVideoScreen;
+ 

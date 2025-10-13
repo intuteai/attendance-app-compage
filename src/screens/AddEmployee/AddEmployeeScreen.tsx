@@ -16,13 +16,16 @@ import { useRoute } from '@react-navigation/native';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'AddEmployee'>;
 
-// ======= CONFIG: endpoints =======
-const BASE_URL = 'http://192.168.1.5:6900'; // replace with your local server IP
-const ERP_CREATE_EMPLOYEE_URL = `${BASE_URL}/register`;
-const VPS_FRAMES_UPLOAD_URL = `${BASE_URL}/upload_frames`;
-// =================================
+/**
+ * ONE source of truth for your server.
+ * If you're testing on device over Wi-Fi, put your machine/server's LAN IP here.
+ * If you're using the VPS, keep it the same for both screens.
+ */
+const BASE_URL = 'http://148.66.155.196:6900'; // <— set the same value used by RecordFaceVideo
+const ERP_CREATE_EMPLOYEE_URL = `${BASE_URL}/register`;      // metadata endpoint (must exist on your server)
+const VPS_FRAMES_UPLOAD_URL = `${BASE_URL}/register`;        // same /register — client streams frames here
 
-// Recording script for RecordFaceVideo screen
+// Recording script for RecordFaceVideo screen (exported if needed elsewhere)
 export const FACE_PROMPTS: ReadonlyArray<string> = [
   'Look straight',
   'Turn left',
@@ -89,16 +92,22 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
 
     setSubmitting(true);
     try {
+      const controller = new AbortController();
+      const to = setTimeout(() => controller.abort(), 8000);
+
       const form = buildFormData();
 
-      // 1️⃣ Send to /register
       const registerResp = await fetch(ERP_CREATE_EMPLOYEE_URL, {
         method: 'POST',
         body: form,
+        signal: controller.signal,
       });
 
+      clearTimeout(to);
+
       if (!registerResp.ok) {
-        throw new Error(`Registration failed: ${registerResp.status}`);
+        const t = await registerResp.text().catch(() => '');
+        throw new Error(`Registration failed: HTTP ${registerResp.status}${t ? ` – ${t}` : ''}`);
       }
 
       Alert.alert('Success', `${fullName} registered successfully.`, [
@@ -107,7 +116,11 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
       resetForm();
     } catch (err: any) {
       console.error('Submit error:', err);
-      Alert.alert('Submit Failed', err?.message ?? 'Could not submit employee.');
+      const msg =
+        err?.name === 'AbortError'
+          ? 'Request timed out. Check network/VPN/ATS settings.'
+          : err?.message ?? 'Could not submit employee.';
+      Alert.alert('Submit Failed', msg);
     } finally {
       setSubmitting(false);
     }
@@ -197,10 +210,10 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
                 }
                 setVideoRecorded(false);
                 navigation.navigate('RecordFaceVideo', {
-   empId,
-   fullName,
-   uploadUrl: VPS_FRAMES_UPLOAD_URL,
- });
+                  empId,
+                  fullName,
+                  uploadUrl: VPS_FRAMES_UPLOAD_URL, // pass the SAME server URL to the recorder
+                } as any);
               }}
               activeOpacity={0.9}
               disabled={submitting}
@@ -226,10 +239,12 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
             {submitting ? (
               <>
                 <ActivityIndicator size="small" color="#0B1220" />
-                <Text style={[styles.submitText, { marginLeft: 8 }]}>Submitting…</Text>
+                <Text style={{ color: '#0B1220', fontWeight: '900', marginLeft: 8 }}>
+                  Submitting…
+                </Text>
               </>
             ) : (
-              <Text style={styles.submitText}>Submit</Text>
+              <Text style={{ color: '#0B1220', fontWeight: '900' }}>Submit</Text>
             )}
           </TouchableOpacity>
         </View>
