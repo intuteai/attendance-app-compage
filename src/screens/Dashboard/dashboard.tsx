@@ -409,7 +409,7 @@ const DashboardScreen: React.FC<Props> = ({ navigation }) => {
         {/* Add Employee */}
         <View style={styles.actionRow}>
           <TouchableOpacity
-            onPress={() => navigation.navigate('AddEmployee')}
+            onPress={() => navigation.navigate('AddEmployee' as any)}
             style={styles.primaryButton}
             activeOpacity={0.92}
             accessibilityRole="button"

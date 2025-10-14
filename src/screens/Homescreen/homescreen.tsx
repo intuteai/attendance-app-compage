@@ -9,7 +9,7 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { Camera, useCameraDevices, PhotoFile } from 'react-native-vision-camera';
+import { Camera, useCameraDevice, PhotoFile } from 'react-native-vision-camera';
 import { Icon } from 'react-native-elements';
 import { check, request, PERMISSIONS, RESULTS, openSettings } from 'react-native-permissions';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -17,7 +17,7 @@ import { styles } from '../Homescreen/homescreen.styles';
 import { RootStackParamList } from '../../../navigation/types'
 import { useIsFocused } from '@react-navigation/native';
 // ======= CONFIG: set your VPS endpoint here =======
-const VPS_UPLOAD_URL = 'https://YOUR_VPS_UPLOAD_ENDPOINT/upload';
+const VPS_UPLOAD_URL = 'http://148.66.155.196:6900/mark_attendance';
 // ================================================
 
 
@@ -36,10 +36,7 @@ const isFocused = useIsFocused();
   const camera = useRef<Camera>(null);
 
   // In your setup, devices is an array
-  const devices = useCameraDevices();
-  const device = Array.isArray(devices)
-    ? devices.find((d) => d.position === 'front')
-    : undefined;
+ const device = useCameraDevice('front');
 
   // ---- Permissions (Camera only; no microphone needed) ----
   const checkPermissions = async () => {

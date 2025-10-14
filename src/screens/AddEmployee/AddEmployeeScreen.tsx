@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -13,19 +13,27 @@ import { RootStackParamList } from '../../../navigation/types';
 import { Icon } from 'react-native-elements';
 import { styles } from './AddEmployeeScreen.styles';
 import { useRoute } from '@react-navigation/native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'AddEmployee'>;
 
 /**
- * ONE source of truth for your server.
- * If you're testing on device over Wi-Fi, put your machine/server's LAN IP here.
- * If you're using the VPS, keep it the same for both screens.
+ * IMPORTANT: keep ML (VPS) base separate from ERP base.
+ * - ML_BASE_URL → FastAPI service with /register (name + files[])
+ * - ERP_BASE_URL → your business API for employee metadata (optional)
  */
-const BASE_URL = 'http://148.66.155.196:6900'; // <— set the same value used by RecordFaceVideo
-const ERP_CREATE_EMPLOYEE_URL = `${BASE_URL}/register`;      // metadata endpoint (must exist on your server)
-const VPS_FRAMES_UPLOAD_URL = `${BASE_URL}/register`;        // same /register — client streams frames here
+const ML_BASE_URL = 'http://148.66.155.196:6900';
+const ML_REGISTER_URL = `${ML_BASE_URL}/register`;
 
-// Recording script for RecordFaceVideo screen (exported if needed elsewhere)
+// your ERP metadata API (REQUIRED for real submission)
+const ERP_BASE_URL = 'https://5ye41lpfm5.execute-api.ap-south-1.amazonaws.com'; // e.g. 'https://api.yourerp.com'
+const ERP_CREATE_EMPLOYEE_URL = ERP_BASE_URL ? `${ERP_BASE_URL}/employee` : '';
+
+// local draft key for persistence
+const DRAFT_KEY = 'addEmployeeDraft:v1';
+// Add near your other keys
+const RESTORE_FLAG_KEY = 'addEmployee:restoreOnReturn';
+
 export const FACE_PROMPTS: ReadonlyArray<string> = [
   'Look straight',
   'Turn left',
@@ -34,80 +42,230 @@ export const FACE_PROMPTS: ReadonlyArray<string> = [
   'Look down',
   'Smile',
 ];
-export const PROMPT_DURATION_MS = 10_000;
-export const FRAME_INTERVAL_MS = 500;
 
 const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
   const [fullName, setFullName] = useState('');
   const [empId, setEmpId] = useState('');
+  const [userId, setUserId] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
+  // NEW: fields required by ERP
+  const [dateOfJoining, setDateOfJoining] = useState(''); // expected format YYYY-MM-DD
+  const [address, setAddress] = useState('');
+
   const [submitting, setSubmitting] = useState(false);
   const [videoRecorded, setVideoRecorded] = useState(false);
+  const [registeredOnML, setRegisteredOnML] = useState(false);
 
   const routeAny = useRoute<any>();
 
-  // if returning from RecordFaceVideo
-  useEffect(() => {
-    const unsub = navigation.addListener('focus', () => {
-      const done = routeAny?.params?.videoDone;
-      if (done) {
-        setVideoRecorded(true);
-        navigation.setParams?.({ videoDone: undefined } as any);
-      }
-    });
-    return unsub;
-  }, [navigation, routeAny]);
+  // --- helpers for draft persistence ---
+  const savingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const buildFormData = () => {
-    const form = new FormData();
-    form.append('name', fullName.trim());
-    form.append('emp_id', empId.trim());
-    if (phone.trim()) form.append('phone', phone.trim());
-    if (email.trim()) form.append('email', email.trim());
-    return form;
+  const hydratedRef = useRef(false);
+
+  const saveDraft = async () => {
+     if (!hydratedRef.current) return;
+    try {
+      const draft = {
+        fullName,
+        empId,
+        userId,
+        phone,
+        email,
+        dateOfJoining,
+        address,
+        videoRecorded,
+        registeredOnML,
+      };
+      await AsyncStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    } catch (e) {
+      // non-fatal
+      console.log('[AddEmployee] Failed to save draft', e);
+    }
   };
+
+  const loadDraft = async () => {
+    try {
+      const raw = await AsyncStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const draft = JSON.parse(raw) as {
+        fullName?: string;
+        empId?: string;
+        userId?: string;
+        phone?: string;
+        email?: string;
+        dateOfJoining?: string;
+        address?: string;
+        videoRecorded?: boolean;
+        registeredOnML?: boolean;
+      };
+      if (typeof draft.fullName === 'string') setFullName(draft.fullName);
+      if (typeof draft.empId === 'string') setEmpId(draft.empId);
+      if (typeof draft.userId === 'string') setUserId(draft.userId);
+      if (typeof draft.phone === 'string') setPhone(draft.phone);
+      if (typeof draft.email === 'string') setEmail(draft.email);
+      if (typeof draft.dateOfJoining === 'string') setDateOfJoining(draft.dateOfJoining);
+      if (typeof draft.address === 'string') setAddress(draft.address);
+      if (typeof draft.videoRecorded === 'boolean') setVideoRecorded(draft.videoRecorded);
+      if (typeof draft.registeredOnML === 'boolean') setRegisteredOnML(draft.registeredOnML);
+    } catch (e) {
+      console.log('[AddEmployee] Failed to load draft', e);
+    }
+  };
+
+  const clearDraft = async () => {
+    try {
+      await AsyncStorage.removeItem(DRAFT_KEY);
+    } catch {}
+  };
+
+
+
+  // Auto-save draft whenever fields change (debounced)
+  useEffect(() => {
+    if (savingRef.current) clearTimeout(savingRef.current);
+    savingRef.current = setTimeout(() => {
+      saveDraft();
+    }, 300);
+    return () => {
+      if (savingRef.current) clearTimeout(savingRef.current);
+    };
+  }, [
+    fullName,
+    empId,
+    userId,
+    phone,
+    email,
+    dateOfJoining,
+    address,
+    videoRecorded,
+    registeredOnML,
+  ]);
+
+  /// AddEmployeeScreen.tsx
+  // Decide whether to restore or start fresh on *first* mount only
+useEffect(() => {
+  (async () => {
+    try {
+      const restore = await AsyncStorage.getItem(RESTORE_FLAG_KEY);
+      if (restore === '1') {
+        // Coming back from capture flow → restore previous draft
+        await loadDraft();
+      } else {
+        // Fresh open or normal navigation → clear everything
+        await AsyncStorage.removeItem(DRAFT_KEY);
+        // Locally reset state (no need to navigate)
+        setFullName('');
+        setEmpId('');
+        setUserId('');
+        setPhone('');
+        setEmail('');
+        setDateOfJoining('');
+        setAddress('');
+        setVideoRecorded(false);
+        setRegisteredOnML(false);
+      }
+    } finally {
+      // Start autosaving only after we've hydrated/cleared
+      hydratedRef.current = true;
+    }
+  })();
+}, []);
+useEffect(() => {
+  const unsub = navigation.addListener('focus', () => {
+    (async () => {
+      await loadDraft(); // ensure old draft is applied first
+
+      const done = routeAny?.params?.videoDone;
+      const ml = routeAny?.params?.mlRegistered;
+      if (done !== undefined) {
+        setVideoRecorded(Boolean(done));
+        setRegisteredOnML(Boolean(ml));
+        // clear params so it doesn't retrigger
+        navigation.setParams?.({ videoDone: undefined, mlRegistered: undefined } as any);
+      }
+       await AsyncStorage.removeItem(RESTORE_FLAG_KEY);
+    })();
+  });
+  return unsub;
+}, [navigation, routeAny]);
 
   const resetForm = () => {
     setFullName('');
     setEmpId('');
+    setUserId('');
     setPhone('');
     setEmail('');
+    setDateOfJoining('');
+    setAddress('');
     setVideoRecorded(false);
+    setRegisteredOnML(false);
+    clearDraft();
   };
 
   const handleSubmit = async () => {
-    if (!fullName.trim() || !empId.trim()) {
-      Alert.alert('Missing Info', 'Please fill Name and Employee ID.');
+    // Validate required fields for ERP
+    if (!fullName.trim()) {
+      Alert.alert('Missing Info', 'Please enter Full Name.');
+      return;
+    }
+    if (!empId.trim() || !userId.trim() || !phone.trim() || !dateOfJoining.trim() || !address.trim()) {
+      Alert.alert(
+        'Missing Info',
+        'Please fill Employee ID, User ID, Phone Number, Date of Joining, and Address.'
+      );
       return;
     }
     if (email && !/^\S+@\S+\.\S+$/.test(email)) {
       Alert.alert('Invalid Email', 'Please enter a valid email address.');
       return;
     }
-    if (!videoRecorded) {
-      Alert.alert('Face Video Required', 'Please complete the face video recording step.');
+    // simple YYYY-MM-DD check
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOfJoining.trim())) {
+      Alert.alert('Invalid Date', 'Date of Joining should be in YYYY-MM-DD format.');
+      return;
+    }
+    if (!videoRecorded || !registeredOnML) {
+      Alert.alert(
+        'Face Registration Required',
+        'Please complete face capture & upload before submitting.'
+      );
       return;
     }
 
-    setSubmitting(true);
+    // If ERP endpoint is not configured, short-circuit with success
+    if (!ERP_CREATE_EMPLOYEE_URL) {
+      Alert.alert('Done', `${fullName} is registered on ML. (No ERP endpoint configured)`, [
+        { text: 'OK', onPress: () => navigation.goBack() },
+      ]);
+      resetForm();
+      return;
+    }
+
     try {
-      const controller = new AbortController();
-      const to = setTimeout(() => controller.abort(), 8000);
+      setSubmitting(true);
+      // IMPORTANT: match ERP required JSON keys exactly
+      const payload = {
+        employee_id: empId.trim(),
+        user_id: userId.trim(),
+        phone_number: phone.trim(),
+        date_of_joining: dateOfJoining.trim(),
+        address: address.trim(),
+        // include optional fields if ERP accepts
+        name: fullName.trim(),
+        email: email.trim() || undefined,
+      } as const;
 
-      const form = buildFormData();
-
-      const registerResp = await fetch(ERP_CREATE_EMPLOYEE_URL, {
+      const resp = await fetch(ERP_CREATE_EMPLOYEE_URL, {
         method: 'POST',
-        body: form,
-        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
 
-      clearTimeout(to);
-
-      if (!registerResp.ok) {
-        const t = await registerResp.text().catch(() => '');
-        throw new Error(`Registration failed: HTTP ${registerResp.status}${t ? ` – ${t}` : ''}`);
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => '');
+        throw new Error(`ERP create failed: HTTP ${resp.status}${t ? ` – ${t}` : ''}`);
       }
 
       Alert.alert('Success', `${fullName} registered successfully.`, [
@@ -116,11 +274,7 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
       resetForm();
     } catch (err: any) {
       console.error('Submit error:', err);
-      const msg =
-        err?.name === 'AbortError'
-          ? 'Request timed out. Check network/VPN/ATS settings.'
-          : err?.message ?? 'Could not submit employee.';
-      Alert.alert('Submit Failed', msg);
+      Alert.alert('Submit Failed', err?.message ?? 'Could not submit employee.');
     } finally {
       setSubmitting(false);
     }
@@ -128,7 +282,7 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
 
   return (
     <View style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.pad}>
+      <ScrollView contentContainerStyle={styles.pad} keyboardShouldPersistTaps="handled">
         <View style={styles.topBar}>
           <TouchableOpacity
             onPress={() => navigation.goBack()}
@@ -154,6 +308,7 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
               style={styles.input}
               autoCapitalize="words"
               editable={!submitting}
+              returnKeyType="next"
             />
           </View>
 
@@ -168,11 +323,28 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
                 style={styles.input}
                 autoCapitalize="characters"
                 editable={!submitting}
+                returnKeyType="next"
               />
             </View>
 
             <View style={[styles.inputGroup, styles.inputHalf]}>
-              <Text style={styles.label}>Phone</Text>
+              <Text style={styles.label}>User ID</Text>
+              <TextInput
+                placeholder="e.g., U-7788"
+                placeholderTextColor="#6B7280"
+                value={userId}
+                onChangeText={setUserId}
+                style={styles.input}
+                autoCapitalize="characters"
+                editable={!submitting}
+                returnKeyType="next"
+              />
+            </View>
+          </View>
+
+          <View style={styles.inputRow}>
+            <View style={[styles.inputGroup, styles.inputHalf]}>
+              <Text style={styles.label}>Phone Number</Text>
               <TextInput
                 placeholder="+91 98765 43210"
                 placeholderTextColor="#6B7280"
@@ -181,51 +353,87 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
                 style={styles.input}
                 keyboardType="phone-pad"
                 editable={!submitting}
+                returnKeyType="next"
+              />
+            </View>
+
+            <View style={[styles.inputGroup, styles.inputHalf]}>
+              <Text style={styles.label}>Email (optional)</Text>
+              <TextInput
+                placeholder="name@company.com"
+                placeholderTextColor="#6B7280"
+                value={email}
+                onChangeText={setEmail}
+                style={styles.input}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                editable={!submitting}
+                returnKeyType="next"
               />
             </View>
           </View>
 
-          <View style={styles.inputGroup}>
-            <Text style={styles.label}>Email</Text>
-            <TextInput
-              placeholder="name@company.com"
-              placeholderTextColor="#6B7280"
-              value={email}
-              onChangeText={setEmail}
-              style={styles.input}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              editable={!submitting}
-            />
+          <View style={styles.inputRow}>
+            <View style={[styles.inputGroup, styles.inputHalf]}>
+              <Text style={styles.label}>Date of Joining (YYYY-MM-DD)</Text>
+              <TextInput
+                placeholder="2025-10-01"
+                placeholderTextColor="#6B7280"
+                value={dateOfJoining}
+                onChangeText={setDateOfJoining}
+                style={styles.input}
+                keyboardType="numeric"
+                editable={!submitting}
+                returnKeyType="next"
+              />
+            </View>
+            <View style={[styles.inputGroup, styles.inputHalf]}>
+              <Text style={styles.label}>Address</Text>
+              <TextInput
+                placeholder="Flat 12B, Lotus Heights, Pune"
+                placeholderTextColor="#6B7280"
+                value={address}
+                onChangeText={setAddress}
+                style={styles.input}
+                editable={!submitting}
+                returnKeyType="done"
+              />
+            </View>
           </View>
 
-          <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Face Video</Text>
+          <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Face Capture</Text>
           <View style={styles.photoRow}>
             <TouchableOpacity
               style={[styles.addPhotoBtn, submitting && { opacity: 0.6 }]}
-              onPress={() => {
-                if (!fullName.trim() || !empId.trim()) {
-                  Alert.alert('Missing Info', 'Please fill Name and Employee ID before recording.');
+              onPress={async () => {
+                if (!fullName.trim() || !empId.trim() || !userId.trim()) {
+                  Alert.alert('Missing Info', 'Please fill Full Name, Employee ID, and User ID before capturing faces.');
                   return;
                 }
+                // persist current draft before navigating away
+                await saveDraft();
+                await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
                 setVideoRecorded(false);
+                setRegisteredOnML(false);
                 navigation.navigate('RecordFaceVideo', {
                   empId,
                   fullName,
-                  uploadUrl: VPS_FRAMES_UPLOAD_URL, // pass the SAME server URL to the recorder
+                  uploadUrl: ML_REGISTER_URL, // pass the ML register endpoint to the capture screen
                 } as any);
               }}
               activeOpacity={0.9}
               disabled={submitting}
             >
               <Icon
-                name={videoRecorded ? 'check' : 'video-camera'}
+                name={videoRecorded ? (registeredOnML ? 'check' : 'photo') : 'video-camera'}
                 type="font-awesome"
                 size={18}
-                color={videoRecorded ? '#22C55E' : '#0EA5E9'}
+                color={videoRecorded ? (registeredOnML ? '#22C55E' : '#0EA5E9') : '#0EA5E9'}
               />
               <Text style={styles.addPhotoText}>
-                {videoRecorded ? 'Recorded' : 'Record Video'}
+                {videoRecorded
+                  ? (registeredOnML ? 'Uploaded' : 'Captured')
+                  : 'Capture Faces & Upload'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -244,7 +452,9 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
                 </Text>
               </>
             ) : (
-              <Text style={{ color: '#0B1220', fontWeight: '900' }}>Submit</Text>
+              <Text style={{ color: '#0B1220', fontWeight: '900' }}>
+                {ERP_CREATE_EMPLOYEE_URL ? 'Submit' : 'Done'}
+              </Text>
             )}
           </TouchableOpacity>
         </View>

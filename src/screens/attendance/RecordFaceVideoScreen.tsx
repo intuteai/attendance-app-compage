@@ -1,31 +1,37 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   Alert,
   ActivityIndicator,
-  Platform,
   BackHandler,
   StyleSheet,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../../navigation/types';
 
-import { Camera, useCameraDevice, VideoFile } from 'react-native-vision-camera';
-import { useIsFocused } from '@react-navigation/native';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraFormat,
+} from 'react-native-vision-camera';
 import { openSettings } from 'react-native-permissions';
 import RNFS from 'react-native-fs';
 import { Icon } from 'react-native-elements';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-/**
- * Fallback URL; will be overridden by route.params.uploadUrl if provided.
- * Keep this identical to AddEmployeeScreen's BASE_URL when using the VPS.
- */
+
+const DRAFT_KEY = 'addEmployeeDraft:v1';
+const RESTORE_FLAG_KEY = 'addEmployee:restoreOnReturn';
+// ====== CONFIG ======
 const DEFAULT_UPLOAD_URL = 'http://148.66.155.196:6900/register';
 
-const FRAME_INTERVAL_MS = 500;     // capture frame every 0.5s
-const PROMPT_DURATION_MS = 10_000; // 10s per prompt
+// Capture cadence / UI timings
+const FRAME_INTERVAL_MS = 900; // ~1 fps while capturing
+const PROMPT_DURATION_MS = 6000; // 6s per prompt
+// Keep in sync with server-side face_processing.MAX_IMAGES (20)
+const MAX_BATCH_FRAMES = 20;
 
 const FACE_PROMPTS: ReadonlyArray<string> = [
   'Look straight',
@@ -40,12 +46,16 @@ type Props = NativeStackScreenProps<RootStackParamList, 'RecordFaceVideo'>;
 
 const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
   const { empId, fullName, uploadUrl } = (route.params as any) || {};
-  const VPS_FRAMES_UPLOAD_URL: string = uploadUrl || DEFAULT_UPLOAD_URL;
+  const ML_REGISTER_URL: string = uploadUrl || DEFAULT_UPLOAD_URL;
 
-  const isFocused = useIsFocused();
-  const front = useCameraDevice('front');
-  const back = useCameraDevice('back');
-  const device = front ?? back;
+  // Prefer front camera, fallback to back
+  const device = useCameraDevice('front') ?? useCameraDevice('back');
+
+  // Lightweight format for fast, reliable still captures
+  const format = useCameraFormat(device ?? undefined, [
+    { videoResolution: { width: 640, height: 360 } },
+    { photoResolution: { width: 640, height: 360 } },
+  ]);
 
   const camera = useRef<Camera>(null);
 
@@ -53,19 +63,23 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
   const [permissionAsked, setPermissionAsked] = useState(false);
   const [hasPermission, setHasPermission] = useState(false);
 
-  // camera/recording flags
+  // session flags
   const [cameraReady, setCameraReady] = useState(false);
-  const [recording, setRecording] = useState(false);
-  const [busy, setBusy] = useState(false); // generic "processing" cover
+  const [recording, setRecording] = useState(false); // logical "session running"
+  const [busy, setBusy] = useState(false); // uploading/finalizing
 
   // prompts
   const [promptIndex, setPromptIndex] = useState(0);
-  const [promptCountdown, setPromptCountdown] = useState(PROMPT_DURATION_MS / 1000);
+  const [promptCountdown, setPromptCountdown] = useState(
+    PROMPT_DURATION_MS / 1000
+  );
+  const totalPrompts = FACE_PROMPTS.length;
+  const totalDurationMs = totalPrompts * PROMPT_DURATION_MS;
 
-  // frame loop
-  const [isSendingFrame, setIsSendingFrame] = useState(false);
-  const framesSentRef = useRef(0);
-  const [framesSent, setFramesSent] = useState(0); // mirror for UI re-render
+  // frame batching
+  const framePathsRef = useRef<string[]>([]); // file:// paths to upload
+  const [capturedCount, setCapturedCount] = useState(0); // internal only (no UI)
+  const [isCapturingFrame, setIsCapturingFrame] = useState(false);
 
   // timers (for cleanup)
   const timersRef = useRef<{
@@ -73,25 +87,14 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     prompt?: ReturnType<typeof setInterval>;
     whole?: ReturnType<typeof setTimeout>;
     frame?: ReturnType<typeof setInterval>;
+    firstTO?: ReturnType<typeof setTimeout>;
   }>({});
 
-  const totalPrompts = FACE_PROMPTS.length;
-  const totalDurationMs = totalPrompts * PROMPT_DURATION_MS;
-
-  // output dir for temp photos
-  const outputDir = useMemo(
-    () =>
-      Platform.select({
-        ios: `${RNFS.CachesDirectoryPath}/face_${Date.now()}`,
-        android: `${RNFS.CachesDirectoryPath}/face_${Date.now()}`,
-      })!,
-    []
-  );
-
-  // ================= Permissions =================
+  // ===== Permissions =====
   const checkPermissions = useCallback(async () => {
     try {
       const cam = await Camera.requestCameraPermission();
+      // mic is not required anymore; you can skip requesting it if you prefer
       const mic = await Camera.requestMicrophonePermission();
       setHasPermission(cam === 'granted' && mic === 'granted');
     } catch {
@@ -105,7 +108,7 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     if (!permissionAsked) checkPermissions();
   }, [permissionAsked, checkPermissions]);
 
-  // prevent back during recording/busy
+  // block back during capture/upload
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (recording || busy) return true;
@@ -114,151 +117,225 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     return () => sub.remove();
   }, [recording, busy]);
 
-  // cleanup timers on unmount
   useEffect(() => {
-    return () => {
-      clearTimers();
-    };
+    return () => clearTimers();
   }, []);
 
-  // ================= Helpers =================
+  // ===== Helpers =====
   const clearTimers = () => {
     const t = timersRef.current;
     if (t.tick) clearInterval(t.tick);
     if (t.prompt) clearInterval(t.prompt);
     if (t.whole) clearTimeout(t.whole);
     if (t.frame) clearInterval(t.frame);
+    if (t.firstTO) clearTimeout(t.firstTO);
     timersRef.current = {};
   };
 
-  // define stopRecording FIRST (so it's available to startPromptTimers)
-  const stopRecording = useCallback(async () => {
+  // take a still photo and buffer it (no upload here)
+  const captureFrame = useCallback(async () => {
+    if (!camera.current || !recording || isCapturingFrame) return;
+    if (framePathsRef.current.length >= MAX_BATCH_FRAMES) return;
+
+    setIsCapturingFrame(true);
     try {
-      clearTimers();
-      await camera.current?.stopRecording();
-      setRecording(false);
-      setBusy(true); // brief cover until onRecordingFinished fires
-    } catch {
-      setBusy(false);
-    }
-  }, []);
+      const photo = await camera.current.takePhoto({});
+      const rawPath = photo?.path ?? '';
+      if (!rawPath) throw new Error('No frame path');
 
-  // then define startPromptTimers
-  const startPromptTimers = useCallback(() => {
-    setPromptIndex(0);
-    setPromptCountdown(PROMPT_DURATION_MS / 1000);
+      const uri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
+      framePathsRef.current.push(uri);
+      const newCount = framePathsRef.current.length;
+      setCapturedCount(newCount);
 
-    // per-second countdown
-    timersRef.current.tick = setInterval(() => {
-      setPromptCountdown((s) => (s <= 1 ? PROMPT_DURATION_MS / 1000 : s - 1));
-    }, 1000);
+      // LOG each capture
+      console.log(
+        `[ML] frame captured ${newCount}/${MAX_BATCH_FRAMES} ` +
+          `(empId=${empId ?? 'N/A'}, name="${fullName ?? ''}")`
+      );
 
-    // advance prompt every PROMPT_DURATION_MS
-    let idx = 0;
-    timersRef.current.prompt = setInterval(() => {
-      idx += 1;
-      if (idx < totalPrompts) {
-        setPromptIndex(idx);
+      // Reached max → stop session & upload
+      if (newCount >= MAX_BATCH_FRAMES) {
+        await stopCapture(); // triggers finalize+upload
+        return;
       }
-    }, PROMPT_DURATION_MS);
+    } catch (e) {
+      console.warn('Frame capture error:', e);
+    } finally {
+      setIsCapturingFrame(false);
+    }
+  }, [recording, isCapturingFrame, empId, fullName]);
 
-    // stop after all prompts
-    timersRef.current.whole = setTimeout(() => {
-      stopRecording();
-    }, totalDurationMs);
-  }, [totalPrompts, totalDurationMs, stopRecording]);
+  const startFrameLoop = useCallback(() => {
+    // small initial delay to let camera settle
+    timersRef.current.firstTO = setTimeout(() => {
+      captureFrame();
+      timersRef.current.frame = setInterval(() => {
+        captureFrame();
+      }, FRAME_INTERVAL_MS);
+    }, 300);
+  }, [captureFrame]);
 
-  // upload a single frame to VPS — matches FastAPI signature: name + files
-  const uploadFrameToVPS = useCallback(
-    async (filePath: string, prompt: string, ts: number) => {
-      if (!VPS_FRAMES_UPLOAD_URL) return true;
+  // >>>>>>> FIX: start frame loop AFTER recording becomes true to avoid stale-closure <<<<<<<
+  useEffect(() => {
+    if (recording) {
+      startFrameLoop();
+    }
+    return () => {
+      // cleanup when recording flips false or component unmounts
+      if (timersRef.current.frame) clearInterval(timersRef.current.frame);
+      if (timersRef.current.firstTO) clearTimeout(timersRef.current.firstTO);
+      timersRef.current.frame = undefined;
+      timersRef.current.firstTO = undefined;
+    };
+  }, [recording, startFrameLoop]);
 
-      const controller = new AbortController();
-      const to = setTimeout(() => controller.abort(), 8000);
+  // POST /register (name + files[])
+  const uploadBatch = useCallback(
+    async (paths: string[]) => {
+      const toSend = paths.slice(0, MAX_BATCH_FRAMES); // ensure we never exceed server MAX_IMAGES
+      console.log(
+        `[ML] Upload triggered: captured=${paths.length}, sending=${toSend.length}, ` +
+          `endpoint=${ML_REGISTER_URL}`
+      );
+      if (!toSend.length) throw new Error('No frames captured.');
+      if (!ML_REGISTER_URL) throw new Error('No ML register URL.');
 
       const form = new FormData();
-
-      // REQUIRED by backend
       form.append('name', String(fullName || ''));
 
-      // Optional metadata (if backend declares them as Form(None))
-      if (empId) form.append('employeeId', String(empId));
-      form.append('prompt', String(prompt));
-      form.append('timestampMs', String(ts));
+      for (let i = 0; i < toSend.length; i++) {
+        form.append('files', {
+          uri: toSend[i],
+          name: `frame_${i + 1}.jpg`,
+          type: 'image/jpeg',
+        } as any);
+      }
 
-      // Backend expects list[UploadFile] under field 'files'
-      form.append('files', {
-        uri: filePath.startsWith('file://') ? filePath : `file://${filePath}`,
-        name: `frame_${ts}.jpg`,
-        type: 'image/jpeg',
-      } as any);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60_000);
 
       try {
-        const res = await fetch(VPS_FRAMES_UPLOAD_URL, {
+        console.log('[ML] Sending POST /register…');
+        const res = await fetch(ML_REGISTER_URL, {
           method: 'POST',
           body: form,
           signal: controller.signal,
         });
+        clearTimeout(timeout);
+
+        console.log('[ML] Response status:', res.status);
+
         if (!res.ok) {
-          const t = await res.text().catch(() => '');
-          throw new Error(`HTTP ${res.status}${t ? ` - ${t}` : ''}`);
+          const text = await res.text().catch(() => '');
+          console.log('[ML] Upload failed:', res.status, text);
+          throw new Error(`Register failed: HTTP ${res.status}${text ? ` – ${text}` : ''}`);
         }
-        return true;
-      } catch (err: any) {
-        console.warn('Upload error:', err?.message ?? err);
-        throw err;
-      } finally {
-        clearTimeout(to);
+
+        const json = await res.json().catch(() => ({}));
+        console.log('[ML] Upload success.', json);
+        return { json, sentCount: toSend.length, capturedCount: paths.length };
+      } catch (e) {
+        clearTimeout(timeout);
+        console.error('[ML] Network or upload error:', e);
+        throw e;
       }
     },
-    [VPS_FRAMES_UPLOAD_URL, fullName, empId]
+    [ML_REGISTER_URL, fullName]
   );
 
-  // capture & send current frame (throttled by FRAME_INTERVAL_MS)
-  const captureAndSendFrame = useCallback(async () => {
-    if (!camera.current || !recording || isSendingFrame) return;
+  const cleanupPhotos = useCallback(async () => {
+    await Promise.allSettled(
+      framePathsRef.current.map(async (p) => {
+        try {
+          const plain = p.replace('file://', '');
+          await RNFS.unlink(plain);
+        } catch {}
+      })
+    );
+  }, []);
 
-    setIsSendingFrame(true);
-    let photoPath: string | null = null;
+  const finalizeUpload = useCallback(async () => {
+    setBusy(true);
 
     try {
-      // takePhoto works while recording on recent VisionCamera versions
-      const photo = await camera.current.takePhoto({});
-      const rawPath = photo?.path ?? '';
-      if (!rawPath) throw new Error('No frame path');
-      photoPath = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
+      // last-chance capture if nothing collected yet
+      if (framePathsRef.current.length === 0 && camera.current) {
+        try {
+          const photo = await camera.current.takePhoto({});
+          const rawPath = photo?.path ?? '';
+          if (rawPath) {
+            const uri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
+            framePathsRef.current.push(uri);
+            const newCount = framePathsRef.current.length;
+            setCapturedCount(newCount);
+            console.log(`[ML] frame captured ${newCount}/${MAX_BATCH_FRAMES} (last-chance)`);
+          }
+        } catch {}
+      }
 
-      // ensure dir exists (first time)
-      await RNFS.mkdir(outputDir).catch(() => {});
+      // LOG: totals before sending
+      console.log(
+        `[ML] Finalizing upload: total captured=${framePathsRef.current.length}, ` +
+          `MAX_BATCH_FRAMES=${MAX_BATCH_FRAMES}`
+      );
 
-      // move/rename to our temp dir
-      const ts = Date.now();
-      const fileDest = `${outputDir}/f_${ts}.jpg`;
-      await RNFS.moveFile(photoPath.replace('file://', ''), fileDest);
+      const { json, sentCount, capturedCount: capCount } = await uploadBatch(
+        framePathsRef.current
+      );
 
-      // upload to VPS with current prompt metadata
-      await uploadFrameToVPS(`file://${fileDest}`, FACE_PROMPTS[promptIndex], ts);
+      // LOG: after success
+      console.log(
+        `[ML] Upload complete: captured=${capCount}, sent=${sentCount}. ` +
+          `Server says: ${JSON.stringify(json)}`
+      );
 
-      framesSentRef.current += 1;
-      setFramesSent(framesSentRef.current);
-    } catch (e) {
-      console.warn('Frame capture/upload error:', e);
-    } finally {
-      setIsSendingFrame(false);
+      await cleanupPhotos();
+
+      Alert.alert('Success', `Registered ${fullName} on ML.`, [
+  {
+    text: 'OK',
+    onPress: async () => {
+      // persist flags so AddEmployee reads them on focus
+      await AsyncStorage.mergeItem(
+        DRAFT_KEY,
+        JSON.stringify({ videoRecorded: true, registeredOnML: true })
+      );
+      // tell AddEmployee to restore instead of clearing
+      await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
+
+      // go back to the existing AddEmployee instance
+      navigation.goBack();
+    },
+  },
+]);
+    } catch (e: any) {
+  console.error('Batch upload error', e);
+  Alert.alert('Registration Failed', e?.message ?? 'Could not upload photos.');
+
+  // mark that a capture happened, but ML didn’t register
+  await AsyncStorage.mergeItem(
+    DRAFT_KEY,
+    JSON.stringify({ videoRecorded: true, registeredOnML: false })
+  );
+  await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
+
+  // return to the same AddEmployee screen
+  navigation.goBack();
+} finally {
+      setBusy(false);
+      framePathsRef.current = [];
+      setCapturedCount(0);
     }
-  }, [recording, isSendingFrame, outputDir, promptIndex, uploadFrameToVPS]);
+  }, [uploadBatch, cleanupPhotos, fullName, navigation]);
 
-  const startFrameLoop = useCallback(() => {
-    captureAndSendFrame(); // fire immediately
-    timersRef.current.frame = setInterval(() => {
-      captureAndSendFrame();
-    }, FRAME_INTERVAL_MS);
-  }, [captureAndSendFrame]);
-
-  // ================= Record controls =================
-  const startRecording = useCallback(async () => {
+  // ===== Capture session controls =====
+  const startCapture = useCallback(async () => {
     if (!device || !cameraReady || !hasPermission) {
-      Alert.alert('Camera Not Ready', 'Please ensure camera & mic permissions are granted.');
+      Alert.alert(
+        'Camera Not Ready',
+        'Please ensure camera permission is granted and camera is initialized.'
+      );
       return;
     }
     if (!empId || !fullName) {
@@ -269,51 +346,55 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     try {
       setRecording(true);
       setBusy(false);
-      framesSentRef.current = 0;
-      setFramesSent(0);
+      framePathsRef.current = [];
+      setCapturedCount(0);
 
-      await camera.current?.startRecording({
-        fileType: 'mp4',
-        videoCodec: 'h264',
-        onRecordingFinished: async (video: VideoFile) => {
-          try {
-            if (video?.path) {
-              await RNFS.unlink(video.path).catch(() => {});
-            }
-            try {
-              await RNFS.unlink(outputDir);
-            } catch {}
-          } catch {}
+      // prompts UI timers
+      setPromptIndex(0);
+      setPromptCountdown(PROMPT_DURATION_MS / 1000);
 
-          Alert.alert('Done', 'Face video & live frames captured successfully.', [
-            {
-              text: 'OK',
-              onPress: () => {
-                navigation.navigate('AddEmployee', { videoDone: true } as any);
-              },
-            },
-          ]);
-        },
-        onRecordingError: (error) => {
-          console.error('Recording error', error);
-          setRecording(false);
-          clearTimers();
-          Alert.alert('Recording Error', error?.message ?? 'Failed to record.');
-        },
-      });
+      timersRef.current.tick = setInterval(() => {
+        setPromptCountdown((s) => (s <= 1 ? PROMPT_DURATION_MS / 1000 : s - 1));
+      }, 1000);
 
-      startPromptTimers();
-      startFrameLoop();
+      let idx = 0;
+      timersRef.current.prompt = setInterval(() => {
+        idx += 1;
+        if (idx < totalPrompts) setPromptIndex(idx);
+      }, PROMPT_DURATION_MS);
+
+      // total session timeout → finalize
+      timersRef.current.whole = setTimeout(() => {
+        stopCapture();
+      }, totalDurationMs);
+
+      // NOTE: startFrameLoop is now started by the `useEffect([recording])` fix above
+      console.log(
+        `[ML] Capture session started for empId=${empId ?? 'N/A'}, name="${
+          fullName ?? ''
+        }". Target frames=${MAX_BATCH_FRAMES}`
+      );
     } catch (e: any) {
-      console.error('startRecording error', e);
+      console.error('startCapture error', e);
       setRecording(false);
       clearTimers();
-      Alert.alert('Error', e?.message ?? 'Unable to start recording.');
+      Alert.alert('Error', e?.message ?? 'Unable to start.');
     }
-  }, [cameraReady, device, hasPermission, empId, fullName, navigation, startPromptTimers, startFrameLoop, outputDir]);
+  }, [device, cameraReady, hasPermission, empId, fullName, totalPrompts, totalDurationMs]);
 
-  const disabledStart =
-    !isFocused || !device || !hasPermission || !cameraReady || recording || busy;
+  const stopCapture = useCallback(async () => {
+    clearTimers();
+    console.log(
+      `[ML] Capture session stopping. Frames captured so far=${framePathsRef.current.length}`
+    );
+    try {
+      await finalizeUpload();
+    } finally {
+      setRecording(false);
+    }
+  }, [finalizeUpload]);
+
+  const disabledStart = !device || !hasPermission || !cameraReady || recording || busy;
 
   return (
     <View style={s.wrap}>
@@ -329,7 +410,7 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
           <Text style={s.backTxt}>Back</Text>
         </TouchableOpacity>
 
-        <Text style={s.title}>Face Video</Text>
+        <Text style={s.title}>Face Registration</Text>
         <View style={{ width: 72 }} />
       </View>
 
@@ -337,7 +418,7 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
         {!hasPermission ? (
           <View style={s.center}>
             <ActivityIndicator size="large" />
-            <Text style={s.hint}>Waiting for camera & mic permission…</Text>
+            <Text style={s.hint}>Waiting for camera permission…</Text>
             {!!permissionAsked && (
               <TouchableOpacity
                 onPress={() => openSettings()}
@@ -358,17 +439,18 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
               ref={camera}
               style={s.camera}
               device={device}
-              isActive={isFocused}
-              photo={true}   // allow takePhoto while recording
-              video={true}
-              audio={true}
+              format={format}
+              isActive={true}
+              photo={true}
+              video={false}
+              audio={false}
               onInitialized={() => setCameraReady(true)}
               onError={(err) => {
                 console.error('Camera error', err);
                 Alert.alert('Camera error', err?.message ?? 'Unknown error');
               }}
             />
-            {/* Overlay prompt */}
+            {/* Overlay prompt (NO frame counters in UI) */}
             <View style={s.overlay}>
               {recording ? (
                 <>
@@ -376,12 +458,10 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
                     <Text style={s.promptTxt}>{FACE_PROMPTS[promptIndex]}</Text>
                   </View>
                   <Text style={s.countdown}>{promptCountdown}s</Text>
-                  <Text style={s.sentTxt}>Frames sent: {framesSent}</Text>
                 </>
               ) : (
                 <Text style={s.readyTxt}>
-                  We’ll guide you through:
-                  {'\n'}
+                  We’ll guide you through:{'\n'}
                   {FACE_PROMPTS.join(' • ')}
                 </Text>
               )}
@@ -395,23 +475,23 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
           <TouchableOpacity
             style={[s.mainBtn, disabledStart && { opacity: 0.5 }]}
             disabled={disabledStart}
-            onPress={startRecording}
+            onPress={startCapture}
           >
             <Icon name="video-camera" type="font-awesome" size={18} color="#0B1220" />
             <Text style={s.mainBtnTxt}>Start</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={s.stopBtn} onPress={stopRecording}>
+          <TouchableOpacity style={s.stopBtn} onPress={stopCapture}>
             <Icon name="stop" type="font-awesome" size={16} color="#0B1220" />
             <Text style={s.stopBtnTxt}>Stop</Text>
           </TouchableOpacity>
         )}
       </View>
 
-      {(busy || !permissionAsked) && (
+      {busy && (
         <View style={s.loadingCover}>
           <ActivityIndicator size="large" />
-          <Text style={s.loadingTxt}>{busy ? 'Finalizing…' : 'Preparing…'}</Text>
+          <Text style={s.loadingTxt}>Uploading…</Text>
         </View>
       )}
     </View>
@@ -478,12 +558,6 @@ const s = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.5,
   },
-  sentTxt: {
-    marginBottom: 18,
-    color: '#94A3B8',
-    fontWeight: '800',
-    fontSize: 12,
-  },
   readyTxt: {
     color: '#9CA3AF',
     textAlign: 'center',
@@ -541,4 +615,3 @@ const s = StyleSheet.create({
 });
 
 export default RecordFaceVideoScreen;
- 
