@@ -3,7 +3,6 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Alert,
   ActivityIndicator,
   BackHandler,
   StyleSheet,
@@ -20,10 +19,11 @@ import { openSettings } from 'react-native-permissions';
 import RNFS from 'react-native-fs';
 import { Icon } from 'react-native-elements';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
+import UniversalModal, { UniversalModalProps } from '../../components/UniversalModal';
 
 const DRAFT_KEY = 'addEmployeeDraft:v1';
 const RESTORE_FLAG_KEY = 'addEmployee:restoreOnReturn';
+
 // ====== CONFIG ======
 const DEFAULT_UPLOAD_URL = 'http://148.66.155.196:6900/register';
 
@@ -80,7 +80,7 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
   const framePathsRef = useRef<string[]>([]); // file:// paths to upload
   const [capturedCount, setCapturedCount] = useState(0); // internal only (no UI)
   const [isCapturingFrame, setIsCapturingFrame] = useState(false);
-
+const stopCaptureRef = useRef<() => Promise<void> | null>(null);
   // timers (for cleanup)
   const timersRef = useRef<{
     tick?: ReturnType<typeof setInterval>;
@@ -90,11 +90,54 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     firstTO?: ReturnType<typeof setTimeout>;
   }>({});
 
+  // ===== Universal Modal =====
+  const [uVisible, setUVisible] = useState(false);
+  const [uCfg, setUCfg] = useState<Omit<UniversalModalProps, 'visible'>>({
+    kind: 'info',
+    title: '',
+    message: '',
+  });
+
+  const openUModal = (cfg: Omit<UniversalModalProps, 'visible'>) => {
+    // default “OK” button if none provided
+    const hasButtons = cfg.primaryButton || cfg.secondaryButton;
+    const primary =
+      cfg.primaryButton ||
+      (!hasButtons
+        ? { text: 'OK', onPress: () => setUVisible(false) }
+        : undefined);
+
+    setUCfg({
+      dismissible: true,
+      ...cfg,
+      primaryButton: primary
+        ? {
+            ...primary,
+            onPress: () => {
+              setUVisible(false);
+              primary?.onPress?.();
+            },
+          }
+        : undefined,
+      secondaryButton: cfg.secondaryButton
+        ? {
+            ...cfg.secondaryButton,
+            onPress: () => {
+              setUVisible(false);
+              cfg.secondaryButton?.onPress?.();
+            },
+          }
+        : undefined,
+    });
+    setUVisible(true);
+  };
+  // ===========================
+
   // ===== Permissions =====
   const checkPermissions = useCallback(async () => {
     try {
       const cam = await Camera.requestCameraPermission();
-      // mic is not required anymore; you can skip requesting it if you prefer
+      // mic not strictly required, but we keep parity with previous impl
       const mic = await Camera.requestMicrophonePermission();
       setHasPermission(cam === 'granted' && mic === 'granted');
     } catch {
@@ -148,23 +191,17 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
       const newCount = framePathsRef.current.length;
       setCapturedCount(newCount);
 
-      // LOG each capture
-      console.log(
-        `[ML] frame captured ${newCount}/${MAX_BATCH_FRAMES} ` +
-          `(empId=${empId ?? 'N/A'}, name="${fullName ?? ''}")`
-      );
-
       // Reached max → stop session & upload
       if (newCount >= MAX_BATCH_FRAMES) {
-        await stopCapture(); // triggers finalize+upload
-        return;
-      }
+  await stopCaptureRef.current?.();
+  return;
+}
     } catch (e) {
       console.warn('Frame capture error:', e);
     } finally {
       setIsCapturingFrame(false);
     }
-  }, [recording, isCapturingFrame, empId, fullName]);
+  }, [recording, isCapturingFrame]);
 
   const startFrameLoop = useCallback(() => {
     // small initial delay to let camera settle
@@ -176,13 +213,12 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
     }, 300);
   }, [captureFrame]);
 
-  // >>>>>>> FIX: start frame loop AFTER recording becomes true to avoid stale-closure <<<<<<<
+  // start the frame loop when recording becomes true
   useEffect(() => {
     if (recording) {
       startFrameLoop();
     }
     return () => {
-      // cleanup when recording flips false or component unmounts
       if (timersRef.current.frame) clearInterval(timersRef.current.frame);
       if (timersRef.current.firstTO) clearTimeout(timersRef.current.firstTO);
       timersRef.current.frame = undefined;
@@ -194,10 +230,6 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
   const uploadBatch = useCallback(
     async (paths: string[]) => {
       const toSend = paths.slice(0, MAX_BATCH_FRAMES); // ensure we never exceed server MAX_IMAGES
-      console.log(
-        `[ML] Upload triggered: captured=${paths.length}, sending=${toSend.length}, ` +
-          `endpoint=${ML_REGISTER_URL}`
-      );
       if (!toSend.length) throw new Error('No frames captured.');
       if (!ML_REGISTER_URL) throw new Error('No ML register URL.');
 
@@ -216,7 +248,6 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
       const timeout = setTimeout(() => controller.abort(), 60_000);
 
       try {
-        console.log('[ML] Sending POST /register…');
         const res = await fetch(ML_REGISTER_URL, {
           method: 'POST',
           body: form,
@@ -224,20 +255,15 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
         });
         clearTimeout(timeout);
 
-        console.log('[ML] Response status:', res.status);
-
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          console.log('[ML] Upload failed:', res.status, text);
           throw new Error(`Register failed: HTTP ${res.status}${text ? ` – ${text}` : ''}`);
         }
 
         const json = await res.json().catch(() => ({}));
-        console.log('[ML] Upload success.', json);
-        return { json, sentCount: toSend.length, capturedCount: paths.length };
+        return json;
       } catch (e) {
         clearTimeout(timeout);
-        console.error('[ML] Network or upload error:', e);
         throw e;
       }
     },
@@ -269,77 +295,75 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
             framePathsRef.current.push(uri);
             const newCount = framePathsRef.current.length;
             setCapturedCount(newCount);
-            console.log(`[ML] frame captured ${newCount}/${MAX_BATCH_FRAMES} (last-chance)`);
           }
         } catch {}
       }
 
-      // LOG: totals before sending
-      console.log(
-        `[ML] Finalizing upload: total captured=${framePathsRef.current.length}, ` +
-          `MAX_BATCH_FRAMES=${MAX_BATCH_FRAMES}`
-      );
-
-      const { json, sentCount, capturedCount: capCount } = await uploadBatch(
-        framePathsRef.current
-      );
-
-      // LOG: after success
-      console.log(
-        `[ML] Upload complete: captured=${capCount}, sent=${sentCount}. ` +
-          `Server says: ${JSON.stringify(json)}`
-      );
-
+      await uploadBatch(framePathsRef.current);
       await cleanupPhotos();
 
-      Alert.alert('Success', `Registered ${fullName} on ML.`, [
-  {
-    text: 'OK',
-    onPress: async () => {
-      // persist flags so AddEmployee reads them on focus
-      await AsyncStorage.mergeItem(
-        DRAFT_KEY,
-        JSON.stringify({ videoRecorded: true, registeredOnML: true })
-      );
-      // tell AddEmployee to restore instead of clearing
-      await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
-
-      // go back to the existing AddEmployee instance
-      navigation.goBack();
-    },
-  },
-]);
+      openUModal({
+        kind: 'success',
+        title: 'Face ID Registered',
+        message: "Your Face ID has been Registed Successfully",
+        primaryButton: {
+          text: 'OK',
+          onPress: async () => {
+            // persist flags so AddEmployee reads them on focus
+            await AsyncStorage.mergeItem(
+              DRAFT_KEY,
+              JSON.stringify({ videoRecorded: true, registeredOnML: true })
+            );
+            // tell AddEmployee to restore instead of clearing
+            await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
+            // go back to the existing AddEmployee instance
+            navigation.goBack();
+          },
+        },
+      });
     } catch (e: any) {
-  console.error('Batch upload error', e);
-  Alert.alert('Registration Failed', e?.message ?? 'Could not upload photos.');
+      console.error('Batch upload error', e);
 
-  // mark that a capture happened, but ML didn’t register
-  await AsyncStorage.mergeItem(
-    DRAFT_KEY,
-    JSON.stringify({ videoRecorded: true, registeredOnML: false })
-  );
-  await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
-
-  // return to the same AddEmployee screen
-  navigation.goBack();
-} finally {
+      openUModal({
+        kind: 'error',
+        title: 'Registration Failed',
+        message: e?.message ?? 'Could not upload photos.',
+        primaryButton: {
+          text: 'OK',
+          onPress: async () => {
+            // mark that a capture happened, but ML didn’t register
+            await AsyncStorage.mergeItem(
+              DRAFT_KEY,
+              JSON.stringify({ videoRecorded: true, registeredOnML: false })
+            );
+            await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
+            navigation.goBack();
+          },
+        },
+      });
+    } finally {
       setBusy(false);
       framePathsRef.current = [];
       setCapturedCount(0);
     }
-  }, [uploadBatch, cleanupPhotos, fullName, navigation]);
+  }, [uploadBatch, cleanupPhotos, navigation]);
 
   // ===== Capture session controls =====
   const startCapture = useCallback(async () => {
     if (!device || !cameraReady || !hasPermission) {
-      Alert.alert(
-        'Camera Not Ready',
-        'Please ensure camera permission is granted and camera is initialized.'
-      );
+      openUModal({
+        kind: 'warning',
+        title: 'Camera Not Ready',
+        message: 'Please ensure camera permission is granted and camera is initialized.',
+      });
       return;
     }
     if (!empId || !fullName) {
-      Alert.alert('Missing Info', 'Employee Name & ID are required before recording.');
+      openUModal({
+        kind: 'warning',
+        title: 'Missing Info',
+        message: 'Employee Name & ID are required before recording.',
+      });
       return;
     }
 
@@ -365,34 +389,31 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
 
       // total session timeout → finalize
       timersRef.current.whole = setTimeout(() => {
-        stopCapture();
-      }, totalDurationMs);
-
-      // NOTE: startFrameLoop is now started by the `useEffect([recording])` fix above
-      console.log(
-        `[ML] Capture session started for empId=${empId ?? 'N/A'}, name="${
-          fullName ?? ''
-        }". Target frames=${MAX_BATCH_FRAMES}`
-      );
+  stopCaptureRef.current?.();
+}, totalDurationMs);
     } catch (e: any) {
-      console.error('startCapture error', e);
       setRecording(false);
       clearTimers();
-      Alert.alert('Error', e?.message ?? 'Unable to start.');
+      openUModal({
+        kind: 'error',
+        title: 'Error Starting Capture',
+        message: e?.message ?? 'Unable to start.',
+      });
     }
   }, [device, cameraReady, hasPermission, empId, fullName, totalPrompts, totalDurationMs]);
 
   const stopCapture = useCallback(async () => {
-    clearTimers();
-    console.log(
-      `[ML] Capture session stopping. Frames captured so far=${framePathsRef.current.length}`
-    );
-    try {
-      await finalizeUpload();
-    } finally {
-      setRecording(false);
-    }
-  }, [finalizeUpload]);
+  clearTimers();
+  try {
+    await finalizeUpload();
+  } finally {
+    setRecording(false);
+  }
+}, [finalizeUpload]);
+
+useEffect(() => {
+  stopCaptureRef.current = stopCapture;
+}, [stopCapture]);
 
   const disabledStart = !device || !hasPermission || !cameraReady || recording || busy;
 
@@ -447,7 +468,11 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
               onInitialized={() => setCameraReady(true)}
               onError={(err) => {
                 console.error('Camera error', err);
-                Alert.alert('Camera error', err?.message ?? 'Unknown error');
+                openUModal({
+                  kind: 'error',
+                  title: 'Camera Error',
+                  message: err?.message ?? 'Unknown error.',
+                });
               }}
             />
             {/* Overlay prompt (NO frame counters in UI) */}
@@ -494,6 +519,13 @@ const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
           <Text style={s.loadingTxt}>Uploading…</Text>
         </View>
       )}
+
+      {/* Global universal modal */}
+      <UniversalModal
+        visible={uVisible}
+        {...uCfg}
+        onRequestClose={() => setUVisible(false)}
+      />
     </View>
   );
 };

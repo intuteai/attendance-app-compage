@@ -5,7 +5,6 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -14,6 +13,7 @@ import { Icon } from 'react-native-elements';
 import { styles } from './AddEmployeeScreen.styles';
 import { useRoute } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import UniversalModal, { UniversalModalProps } from '../../components/UniversalModal';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'AddEmployee'>;
 
@@ -61,11 +61,57 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
 
   // --- helpers for draft persistence ---
   const savingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const hydratedRef = useRef(false);
 
+  // ---------- Universal Modal state / helper ----------
+  const [uVisible, setUVisible] = useState(false);
+  const [uCfg, setUCfg] = useState<Omit<UniversalModalProps, 'visible'>>({
+    kind: 'info',
+    title: '',
+    message: '',
+  });
+
+  const openUModal = (cfg: Omit<UniversalModalProps, 'visible'>) => {
+  // if developer didn't specify any buttons, default to one OK button
+  const hasButtons = cfg.primaryButton || cfg.secondaryButton;
+
+  const primary =
+    cfg.primaryButton ||
+    (!hasButtons
+      ? {
+          text: 'OK',
+          onPress: () => setUVisible(false),
+        }
+      : undefined);
+
+  setUCfg({
+    dismissible: true,
+    ...cfg,
+    primaryButton: primary
+      ? {
+          ...primary,
+          onPress: () => {
+            setUVisible(false);
+            primary?.onPress?.();
+          },
+        }
+      : undefined,
+    secondaryButton: cfg.secondaryButton
+      ? {
+          ...cfg.secondaryButton,
+          onPress: () => {
+            setUVisible(false);
+            cfg.secondaryButton?.onPress?.();
+          },
+        }
+      : undefined,
+  });
+  setUVisible(true);
+};
+  // ----------------------------------------------------
+
   const saveDraft = async () => {
-     if (!hydratedRef.current) return;
+    if (!hydratedRef.current) return;
     try {
       const draft = {
         fullName,
@@ -120,8 +166,6 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
     } catch {}
   };
 
-
-
   // Auto-save draft whenever fields change (debounced)
   useEffect(() => {
     if (savingRef.current) clearTimeout(savingRef.current);
@@ -143,53 +187,53 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
     registeredOnML,
   ]);
 
-  /// AddEmployeeScreen.tsx
-  // Decide whether to restore or start fresh on *first* mount only
-useEffect(() => {
-  (async () => {
-    try {
-      const restore = await AsyncStorage.getItem(RESTORE_FLAG_KEY);
-      if (restore === '1') {
-        // Coming back from capture flow → restore previous draft
-        await loadDraft();
-      } else {
-        // Fresh open or normal navigation → clear everything
-        await AsyncStorage.removeItem(DRAFT_KEY);
-        // Locally reset state (no need to navigate)
-        setFullName('');
-        setEmpId('');
-        setUserId('');
-        setPhone('');
-        setEmail('');
-        setDateOfJoining('');
-        setAddress('');
-        setVideoRecorded(false);
-        setRegisteredOnML(false);
-      }
-    } finally {
-      // Start autosaving only after we've hydrated/cleared
-      hydratedRef.current = true;
-    }
-  })();
-}, []);
-useEffect(() => {
-  const unsub = navigation.addListener('focus', () => {
+  /// Decide whether to restore or start fresh on *first* mount only
+  useEffect(() => {
     (async () => {
-      await loadDraft(); // ensure old draft is applied first
-
-      const done = routeAny?.params?.videoDone;
-      const ml = routeAny?.params?.mlRegistered;
-      if (done !== undefined) {
-        setVideoRecorded(Boolean(done));
-        setRegisteredOnML(Boolean(ml));
-        // clear params so it doesn't retrigger
-        navigation.setParams?.({ videoDone: undefined, mlRegistered: undefined } as any);
+      try {
+        const restore = await AsyncStorage.getItem(RESTORE_FLAG_KEY);
+        if (restore === '1') {
+          // Coming back from capture flow → restore previous draft
+          await loadDraft();
+        } else {
+          // Fresh open or normal navigation → clear everything
+          await AsyncStorage.removeItem(DRAFT_KEY);
+          // Locally reset state (no need to navigate)
+          setFullName('');
+          setEmpId('');
+          setUserId('');
+          setPhone('');
+          setEmail('');
+          setDateOfJoining('');
+          setAddress('');
+          setVideoRecorded(false);
+          setRegisteredOnML(false);
+        }
+      } finally {
+        // Start autosaving only after we've hydrated/cleared
+        hydratedRef.current = true;
       }
-       await AsyncStorage.removeItem(RESTORE_FLAG_KEY);
     })();
-  });
-  return unsub;
-}, [navigation, routeAny]);
+  }, []);
+
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      (async () => {
+        await loadDraft(); // ensure old draft is applied first
+
+        const done = routeAny?.params?.videoDone;
+        const ml = routeAny?.params?.mlRegistered;
+        if (done !== undefined) {
+          setVideoRecorded(Boolean(done));
+          setRegisteredOnML(Boolean(ml));
+          // clear params so it doesn't retrigger
+          navigation.setParams?.({ videoDone: undefined, mlRegistered: undefined } as any);
+        }
+        await AsyncStorage.removeItem(RESTORE_FLAG_KEY);
+      })();
+    });
+    return unsub;
+  }, [navigation, routeAny]);
 
   const resetForm = () => {
     setFullName('');
@@ -207,38 +251,58 @@ useEffect(() => {
   const handleSubmit = async () => {
     // Validate required fields for ERP
     if (!fullName.trim()) {
-      Alert.alert('Missing Info', 'Please enter Full Name.');
+      openUModal({
+        kind: 'warning',
+        title: 'Missing Information',
+        message: 'Please enter the full name.',
+      });
       return;
     }
     if (!empId.trim() || !userId.trim() || !phone.trim() || !dateOfJoining.trim() || !address.trim()) {
-      Alert.alert(
-        'Missing Info',
-        'Please fill Employee ID, User ID, Phone Number, Date of Joining, and Address.'
-      );
+      openUModal({
+        kind: 'warning',
+        title: 'Missing Information',
+        message: 'Please fill Employee ID, User ID, Phone Number, Date of Joining, and Address.',
+      });
       return;
     }
     if (email && !/^\S+@\S+\.\S+$/.test(email)) {
-      Alert.alert('Invalid Email', 'Please enter a valid email address.');
+      openUModal({
+        kind: 'warning',
+        title: 'Invalid Email',
+        message: 'Please enter a valid email address.',
+      });
       return;
     }
     // simple YYYY-MM-DD check
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOfJoining.trim())) {
-      Alert.alert('Invalid Date', 'Date of Joining should be in YYYY-MM-DD format.');
+      openUModal({
+        kind: 'warning',
+        title: 'Invalid Date',
+        message: 'Date of Joining should be in YYYY-MM-DD format.',
+      });
       return;
     }
     if (!videoRecorded || !registeredOnML) {
-      Alert.alert(
-        'Face Registration Required',
-        'Please complete face capture & upload before submitting.'
-      );
+      openUModal({
+        kind: 'info',
+        title: 'Face Registration Required',
+        message: 'Please complete face capture and upload before submitting.',
+      });
       return;
     }
 
     // If ERP endpoint is not configured, short-circuit with success
     if (!ERP_CREATE_EMPLOYEE_URL) {
-      Alert.alert('Done', `${fullName} is registered on ML. (No ERP endpoint configured)`, [
-        { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
+      openUModal({
+        kind: 'success',
+        title: 'Registration Complete',
+        message: `${fullName} has been registered for face recognition. (ERP endpoint not configured)`,
+        primaryButton: {
+          text: 'OK',
+          onPress: () => navigation.goBack(),
+        },
+      });
       resetForm();
       return;
     }
@@ -268,13 +332,24 @@ useEffect(() => {
         throw new Error(`ERP create failed: HTTP ${resp.status}${t ? ` – ${t}` : ''}`);
       }
 
-      Alert.alert('Success', `${fullName} registered successfully.`, [
-        { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
+      openUModal({
+        kind: 'success',
+        title: 'Employee Added',
+        message: `${fullName} has been registered successfully.`,
+        primaryButton: {
+          text: 'OK',
+          onPress: () => navigation.goBack(),
+        },
+      });
       resetForm();
     } catch (err: any) {
       console.error('Submit error:', err);
-      Alert.alert('Submit Failed', err?.message ?? 'Could not submit employee.');
+      openUModal({
+        kind: 'error',
+        title: 'Submission Failed',
+        message: err?.message ?? 'Could not submit employee.',
+        
+      });
     } finally {
       setSubmitting(false);
     }
@@ -407,9 +482,16 @@ useEffect(() => {
               style={[styles.addPhotoBtn, submitting && { opacity: 0.6 }]}
               onPress={async () => {
                 if (!fullName.trim() || !empId.trim() || !userId.trim()) {
-                  Alert.alert('Missing Info', 'Please fill Full Name, Employee ID, and User ID before capturing faces.');
-                  return;
-                }
+  openUModal({
+    kind: 'info',
+    title: 'Details Required',
+    message: 'Please fill Full Name, Employee ID, and User ID before capturing faces.',
+    primaryButton: {
+      text: 'OK',
+    },
+  });
+  return;
+}
                 // persist current draft before navigating away
                 await saveDraft();
                 await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
@@ -459,6 +541,13 @@ useEffect(() => {
           </TouchableOpacity>
         </View>
       </ScrollView>
+
+      {/* Global universal modal */}
+      <UniversalModal
+        visible={uVisible}
+        {...uCfg}
+        onRequestClose={() => setUVisible(false)}
+      />
     </View>
   );
 };

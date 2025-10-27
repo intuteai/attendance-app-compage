@@ -3,7 +3,6 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Alert,
   ActivityIndicator,
   Modal,
   StyleSheet,
@@ -14,13 +13,13 @@ import { Icon } from 'react-native-elements';
 import { check, request, PERMISSIONS, RESULTS, openSettings } from 'react-native-permissions';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { styles } from '../Homescreen/homescreen.styles';
-import { RootStackParamList } from '../../../navigation/types'
+import { RootStackParamList } from '../../../navigation/types';
 import { useIsFocused } from '@react-navigation/native';
+import UniversalModal, { UniversalModalProps } from '../../components/UniversalModal';
+
 // ======= CONFIG: set your VPS endpoint here =======
 const VPS_UPLOAD_URL = 'http://148.66.155.196:6900/mark_attendance';
 // ================================================
-
-
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
@@ -32,11 +31,46 @@ const HomeScreen: React.FC<Props> = ({ navigation }) => {
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [imagePaths, setImagePaths] = useState<string[]>([]);
-const isFocused = useIsFocused();
+  const isFocused = useIsFocused();
   const camera = useRef<Camera>(null);
 
+  // NEW: Universal modal state
+  const [uModal, setUModal] = useState<Omit<UniversalModalProps, 'visible'>>({
+    kind: 'info',
+    title: '',
+    message: '',
+  });
+  const [uVisible, setUVisible] = useState(false);
+
+  const openUModal = (cfg: Omit<UniversalModalProps, 'visible'>) => {
+    setUModal({
+      dismissible: true,
+      ...cfg,
+      // ensure buttons close the modal before custom handlers
+      primaryButton: cfg.primaryButton
+        ? {
+            ...cfg.primaryButton,
+            onPress: () => {
+              setUVisible(false);
+              cfg.primaryButton?.onPress?.();
+            },
+          }
+        : undefined,
+      secondaryButton: cfg.secondaryButton
+        ? {
+            ...cfg.secondaryButton,
+            onPress: () => {
+              setUVisible(false);
+              cfg.secondaryButton?.onPress?.();
+            },
+          }
+        : undefined,
+    });
+    setUVisible(true);
+  };
+
   // In your setup, devices is an array
- const device = useCameraDevice('front');
+  const device = useCameraDevice('front');
 
   // ---- Permissions (Camera only; no microphone needed) ----
   const checkPermissions = async () => {
@@ -64,7 +98,11 @@ const isFocused = useIsFocused();
       setPermissionAsked(true);
     } catch (error) {
       console.error('Permission check error:', error);
-      Alert.alert('Error', 'Failed to check permissions.');
+      openUModal({
+        kind: 'error',
+        title: 'Permission Error',
+        message: 'Failed to check permissions.',
+      });
     }
   };
 
@@ -84,23 +122,35 @@ const isFocused = useIsFocused();
           setHasPermission(true);
         } else {
           setHasPermission(false);
-          Alert.alert('Permission Denied', 'Camera access is required.');
+          openUModal({
+            kind: 'warning',
+            title: 'Permission Denied',
+            message: 'Camera access is required.',
+          });
         }
       } else if (cameraStatus === RESULTS.BLOCKED) {
-        Alert.alert(
-          'Permission Blocked',
-          'Camera access is blocked. Please enable it in Settings.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => openSettings() },
-          ]
-        );
+        openUModal({
+          kind: 'warning',
+          title: 'Permission Blocked',
+          message: 'Camera access is blocked. Please enable it in Settings.',
+          primaryButton: {
+            text: 'Open Settings',
+            onPress: () => openSettings(),
+          },
+          secondaryButton: {
+            text: 'Cancel',
+          },
+        });
       } else {
         setHasPermission(false);
       }
     } catch (error) {
       console.error('Permission request error:', error);
-      Alert.alert('Error', 'Failed to request permissions.');
+      openUModal({
+        kind: 'error',
+        title: 'Permission Error',
+        message: 'Failed to request permissions.',
+      });
     }
   };
 
@@ -117,7 +167,11 @@ const isFocused = useIsFocused();
   // ---- Capture + Upload (no video recording) ----
   const handleCaptureImage = async () => {
     if (!device || !cameraReady) {
-      Alert.alert('Camera not ready', 'Please wait until the camera is ready...');
+      openUModal({
+        kind: 'info',
+        title: 'Camera not ready',
+        message: 'Please wait until the camera is ready…',
+      });
       return;
     }
 
@@ -129,12 +183,15 @@ const isFocused = useIsFocused();
     try {
       setCapturing(true);
 
-      // Keep takePhoto options minimal to match your typings
       const photo: PhotoFile | undefined = await camera.current?.takePhoto({});
 
       if (!photo?.path) {
         setCapturing(false);
-        Alert.alert('Error', 'Failed to capture image.');
+        openUModal({
+          kind: 'error',
+          title: 'Capture Failed',
+          message: 'Failed to capture image.',
+        });
         return;
       }
 
@@ -144,7 +201,6 @@ const isFocused = useIsFocused();
       const filename = `frame-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
 
       const form = new FormData();
-      // RN's FormData file typing is loose; cast as any to satisfy TS
       form.append(
         'file',
         {
@@ -156,7 +212,6 @@ const isFocused = useIsFocused();
 
       const res = await fetch(VPS_UPLOAD_URL, {
         method: 'POST',
-        // Let RN set the multipart boundary automatically
         body: form,
       });
 
@@ -165,10 +220,18 @@ const isFocused = useIsFocused();
         throw new Error(`Upload failed (${res.status}): ${text}`);
       }
 
-      Alert.alert('Uploaded', 'Frame captured and sent to server.');
+      openUModal({
+        kind: 'success',
+        title: 'Attendance Recorded',
+        message: 'Your attendance for today has been successfully recorded.',
+      });
     } catch (error: any) {
       console.error('Capture/Upload error:', error);
-      Alert.alert('Upload Error', error?.message ?? 'Failed to upload image.');
+      openUModal({
+        kind: 'error',
+        title: 'Upload Error',
+        message: error?.message ?? 'Failed to upload image.',
+      });
     } finally {
       setCapturing(false);
     }
@@ -186,6 +249,8 @@ const isFocused = useIsFocused();
     return (
       <View style={styles.container}>
         <Text style={styles.title}>Mark your Attendance</Text>
+
+        {/* Retain your existing permission modal UI (can be swapped to UniversalModal later if you want) */}
         {!hasPermission && (
           <Modal
             transparent
@@ -234,6 +299,13 @@ const isFocused = useIsFocused();
           <Text style={styles.cardTitle}>Dashboard</Text>
           <Text style={styles.cardSubtitle}>Go to your dashboard and settings</Text>
         </TouchableOpacity>
+
+        {/* Universal Modal (global) */}
+        <UniversalModal
+          visible={uVisible}
+          {...uModal}
+          onRequestClose={() => setUVisible(false)}
+        />
       </View>
     );
   }
@@ -243,6 +315,12 @@ const isFocused = useIsFocused();
       <View style={styles.container}>
         <ActivityIndicator size="large" color="#1F2937" />
         <Text style={styles.text}>Loading Camera...</Text>
+
+        <UniversalModal
+          visible={uVisible}
+          {...uModal}
+          onRequestClose={() => setUVisible(false)}
+        />
       </View>
     );
   }
@@ -259,7 +337,11 @@ const isFocused = useIsFocused();
         onInitialized={() => setCameraReady(true)}
         onError={(error) => {
           console.error('Camera Error:', error);
-          Alert.alert('Camera Error', error.message);
+          openUModal({
+            kind: 'error',
+            title: 'Camera Error',
+            message: error.message,
+          });
         }}
       />
 
@@ -267,8 +349,6 @@ const isFocused = useIsFocused();
         <Text style={styles.title}>Mark Your Attendance</Text>
 
         <View style={styles.controlPanel}>
-          {/* Always front camera; removed switch + torch */}
-
           <TouchableOpacity
             style={styles.actionButton}
             onPress={handleCaptureImage}
@@ -295,6 +375,13 @@ const isFocused = useIsFocused();
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* Universal Modal (global) */}
+      <UniversalModal
+        visible={uVisible}
+        {...uModal}
+        onRequestClose={() => setUVisible(false)}
+      />
     </View>
   );
 };
