@@ -251,7 +251,7 @@ const HomeScreen: React.FC<Props> = ({ navigation }) => {
         <Text style={styles.title}>Mark your Attendance</Text>
 
         {/* Retain your existing permission modal UI (can be swapped to UniversalModal later if you want) */}
-        {!hasPermission && (
+        {/* {!hasPermission && (
           <Modal
             transparent
             visible={showPermissionModal}
@@ -275,7 +275,7 @@ const HomeScreen: React.FC<Props> = ({ navigation }) => {
               </View>
             </View>
           </Modal>
-        )}
+        )} */}
 
         <TouchableOpacity
           style={styles.card}

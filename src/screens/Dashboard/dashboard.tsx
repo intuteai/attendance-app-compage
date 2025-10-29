@@ -16,7 +16,7 @@ import { RootStackParamList } from '../../../navigation/types';
 
 // import Config from 'react-native-config';
 // const API_BASE_URL = Config.API_BASE_URL;
-const API_BASE_URL = 'erp-database-instance.c3y46ues4aqu.ap-south-1.rds.amazonaws.com'; // <-- set me
+const API_BASE_URL = 'erp-database-instance.c3y46ues4aqu.ap-south-1.rds.amazonaws.com';
 const AUTH_TOKEN = ''; // e.g. 'Bearer eyJ...' if required
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Dashboard'>;
