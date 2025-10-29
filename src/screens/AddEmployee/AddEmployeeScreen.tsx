@@ -481,14 +481,12 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
             <TouchableOpacity
               style={[styles.addPhotoBtn, submitting && { opacity: 0.6 }]}
               onPress={async () => {
-                if (!fullName.trim() || !empId.trim() || !userId.trim()) {
+                if (!fullName.trim() || !userId.trim() ) {
   openUModal({
     kind: 'info',
     title: 'Details Required',
-    message: 'Please fill Full Name, Employee ID, and User ID before capturing faces.',
-    primaryButton: {
-      text: 'OK',
-    },
+    message: 'Please fill User ID before capturing faces.',
+    primaryButton: { text: 'OK' },
   });
   return;
 }
@@ -498,10 +496,10 @@ const AddEmployeeScreen: React.FC<Props> = ({ navigation }) => {
                 setVideoRecorded(false);
                 setRegisteredOnML(false);
                 navigation.navigate('RecordFaceVideo', {
-                  empId,
-                  fullName,
-                  uploadUrl: ML_REGISTER_URL, // pass the ML register endpoint to the capture screen
-                } as any);
+  userId,
+  fullName,
+  uploadUrl: ML_REGISTER_URL, // pass the ML register endpoint to the capture screen
+} as any);
               }}
               activeOpacity={0.9}
               disabled={submitting}

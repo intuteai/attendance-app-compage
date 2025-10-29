@@ -45,8 +45,8 @@ const FACE_PROMPTS: ReadonlyArray<string> = [
 type Props = NativeStackScreenProps<RootStackParamList, 'RecordFaceVideo'>;
 
 const RecordFaceVideoScreen: React.FC<Props> = ({ navigation, route }) => {
-  const { empId, fullName, uploadUrl } = (route.params as any) || {};
-  const ML_REGISTER_URL: string = uploadUrl || DEFAULT_UPLOAD_URL;
+const { userId, fullName, uploadUrl } = (route.params as any) || {};
+const ML_REGISTER_URL: string = uploadUrl || DEFAULT_UPLOAD_URL;
 
   // Prefer front camera, fallback to back
   const device = useCameraDevice('front') ?? useCameraDevice('back');
@@ -234,15 +234,17 @@ const stopCaptureRef = useRef<() => Promise<void> | null>(null);
       if (!ML_REGISTER_URL) throw new Error('No ML register URL.');
 
       const form = new FormData();
-      form.append('name', String(fullName || ''));
+form.append('name', String(fullName || ''));   // ✅ real name for backend
 
-      for (let i = 0; i < toSend.length; i++) {
-        form.append('files', {
-          uri: toSend[i],
-          name: `frame_${i + 1}.jpg`,
-          type: 'image/jpeg',
-        } as any);
-      }
+form.append('user_id', String(userId || ''));
+
+for (let i = 0; i < toSend.length; i++) {
+  form.append('files', {
+    uri: toSend[i],
+    name: `frame_${i + 1}.jpg`,
+    type: 'image/jpeg',
+  } as any);
+}
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 60_000);
@@ -267,7 +269,7 @@ const stopCaptureRef = useRef<() => Promise<void> | null>(null);
         throw e;
       }
     },
-    [ML_REGISTER_URL, fullName]
+    [ML_REGISTER_URL, userId, fullName]
   );
 
   const cleanupPhotos = useCallback(async () => {
@@ -358,14 +360,14 @@ const stopCaptureRef = useRef<() => Promise<void> | null>(null);
       });
       return;
     }
-    if (!empId || !fullName) {
-      openUModal({
-        kind: 'warning',
-        title: 'Missing Info',
-        message: 'Employee Name & ID are required before recording.',
-      });
-      return;
-    }
+    if (!userId || !fullName) {
+  openUModal({
+    kind: 'warning',
+    title: 'Missing Info',
+    message: 'User ID is required before recording.',
+  });
+  return;
+}
 
     try {
       setRecording(true);
@@ -400,7 +402,7 @@ const stopCaptureRef = useRef<() => Promise<void> | null>(null);
         message: e?.message ?? 'Unable to start.',
       });
     }
-  }, [device, cameraReady, hasPermission, empId, fullName, totalPrompts, totalDurationMs]);
+  }, [device, cameraReady, hasPermission, userId, fullName,totalPrompts, totalDurationMs]);
 
   const stopCapture = useCallback(async () => {
   clearTimers();
