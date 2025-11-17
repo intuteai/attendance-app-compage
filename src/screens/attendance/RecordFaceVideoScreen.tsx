@@ -293,7 +293,7 @@ for (let i = 0; i < toSend.length; i++) {
           const photo = await camera.current.takePhoto({});
           const rawPath = photo?.path ?? '';
           if (rawPath) {
-            const uri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
+           const uri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
             framePathsRef.current.push(uri);
             const newCount = framePathsRef.current.length;
             setCapturedCount(newCount);
