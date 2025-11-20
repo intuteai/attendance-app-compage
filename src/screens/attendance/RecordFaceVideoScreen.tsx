@@ -26,7 +26,13 @@ const RESTORE_FLAG_KEY = 'addEmployee:restoreOnReturn';
 
 // ====== CONFIG ======
 const DEFAULT_UPLOAD_URL = 'http://148.66.155.196:6900/register';
-
+const buildDebugInfo = (label: string, data: any) => {
+  try {
+    return `${label}:\n${JSON.stringify(data, null, 2)}`;
+  } catch {
+    return `${label}: [unserializable debug data]`;
+  }
+};
 // Capture cadence / UI timings
 const FRAME_INTERVAL_MS = 900; // ~1 fps while capturing
 const PROMPT_DURATION_MS = 6000; // 6s per prompt
@@ -227,50 +233,83 @@ const stopCaptureRef = useRef<() => Promise<void> | null>(null);
   }, [recording, startFrameLoop]);
 
   // POST /register (name + files[])
-  const uploadBatch = useCallback(
-    async (paths: string[]) => {
-      const toSend = paths.slice(0, MAX_BATCH_FRAMES); // ensure we never exceed server MAX_IMAGES
-      if (!toSend.length) throw new Error('No frames captured.');
-      if (!ML_REGISTER_URL) throw new Error('No ML register URL.');
+ const uploadBatch = useCallback(
+  async (paths: string[]) => {
+    const toSend = paths.slice(0, MAX_BATCH_FRAMES); // ensure we never exceed server MAX_IMAGES
+    if (!toSend.length) throw new Error('No frames captured.');
+    if (!ML_REGISTER_URL) throw new Error('No ML register URL.');
 
-      const form = new FormData();
-form.append('name', String(fullName || ''));   // ✅ real name for backend
+    const form = new FormData();
+    form.append('name', String(fullName || ''));
+    form.append('user_id', String(userId || ''));
 
-form.append('user_id', String(userId || ''));
+    for (let i = 0; i < toSend.length; i++) {
+      form.append('files', {
+        uri: toSend[i],
+        name: `frame_${i + 1}.jpg`,
+        type: 'image/jpeg',
+      } as any);
+    }
 
-for (let i = 0; i < toSend.length; i++) {
-  form.append('files', {
-    uri: toSend[i],
-    name: `frame_${i + 1}.jpg`,
-    type: 'image/jpeg',
-  } as any);
-}
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 240_000);
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60_000);
+    const startedAt = Date.now();
 
-      try {
-        const res = await fetch(ML_REGISTER_URL, {
-          method: 'POST',
-          body: form,
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
+    try {
+      const res = await fetch(ML_REGISTER_URL, {
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      });
+      const durationMs = Date.now() - startedAt;
+      clearTimeout(timeout);
 
-        if (!res.ok) {
-          const text = await res.text().catch(() => '');
-          throw new Error(`Register failed: HTTP ${res.status}${text ? ` – ${text}` : ''}`);
-        }
+      const responseText = await res.text().catch(() => '');
 
-        const json = await res.json().catch(() => ({}));
-        return json;
-      } catch (e) {
-        clearTimeout(timeout);
-        throw e;
+      if (!res.ok) {
+        const richError: any = new Error(
+          `Register failed: HTTP ${res.status}${
+            responseText ? ` – ${responseText.slice(0, 200)}` : ''
+          }`
+        );
+        richError.debugInfo = {
+          url: ML_REGISTER_URL,
+          status: res.status,
+          durationMs,
+          framesSent: toSend.length,
+          responsePreview: responseText?.slice(0, 500),
+        };
+        throw richError;
       }
-    },
-    [ML_REGISTER_URL, userId, fullName]
-  );
+
+      // If OK but we already consumed text, try to parse it as JSON if possible
+      let json: any = {};
+      try {
+        json = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        json = { raw: responseText };
+      }
+      return json;
+    } catch (e: any) {
+      clearTimeout(timeout);
+
+      // Attach client-side debug info if not already present
+      if (!e.debugInfo) {
+        e.debugInfo = {
+          url: ML_REGISTER_URL,
+          framesSent: toSend.length,
+          elapsedMs: Date.now() - startedAt,
+          errorName: e?.name,
+          errorMessage: e?.message,
+        };
+      }
+
+      throw e;
+    }
+  },
+  [ML_REGISTER_URL, userId, fullName]
+);
 
   const cleanupPhotos = useCallback(async () => {
     await Promise.allSettled(
@@ -324,26 +363,38 @@ for (let i = 0; i < toSend.length; i++) {
         },
       });
     } catch (e: any) {
-      console.error('Batch upload error', e);
+  console.error('Batch upload error', e);
 
-      openUModal({
-        kind: 'error',
-        title: 'Registration Failed',
-        message: e?.message ?? 'Could not upload photos.',
-        primaryButton: {
-          text: 'OK',
-          onPress: async () => {
-            // mark that a capture happened, but ML didn’t register
-            await AsyncStorage.mergeItem(
-              DRAFT_KEY,
-              JSON.stringify({ videoRecorded: true, registeredOnML: false })
-            );
-            await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
-            navigation.goBack();
-          },
-        },
-      });
-    } finally {
+  const debugInfo = buildDebugInfo('Debug info', {
+    url: ML_REGISTER_URL,
+    framesCaptured: framePathsRef.current.length,
+    errorName: e?.name,
+    errorMessage: e?.message,
+    // anything that uploadBatch attached:
+    backendDebug: e?.debugInfo || null,
+  });
+
+  // You can hide this behind __DEV__ if you only want it in dev,
+  // but since you want to see it in release, we show it directly.
+  const userMessage = e?.message ?? 'Could not upload photos.';
+
+  openUModal({
+    kind: 'error',
+    title: 'Registration Failed',
+    message: `${userMessage}\n\n${debugInfo}`,
+    primaryButton: {
+      text: 'OK',
+      onPress: async () => {
+        await AsyncStorage.mergeItem(
+          DRAFT_KEY,
+          JSON.stringify({ videoRecorded: true, registeredOnML: false })
+        );
+        await AsyncStorage.setItem(RESTORE_FLAG_KEY, '1');
+        navigation.goBack();
+      },
+    },
+  });
+} finally {
       setBusy(false);
       framePathsRef.current = [];
       setCapturedCount(0);
